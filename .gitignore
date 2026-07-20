@@ -1,2 +1,3 @@
 terraform.tfstate
 *secret.yaml
+.env
