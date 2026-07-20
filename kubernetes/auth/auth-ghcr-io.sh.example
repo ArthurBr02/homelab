@@ -1,0 +1,6 @@
+#!/bin/sh
+export GHCR_USERNAME=<username>
+export GHCR_TOKEN=<token>
+export GHCR_EMAIL=<email>
+
+kubectl create secret docker-registry ghcr-login-secret --docker-server=https://ghcr.io --docker-username=$GHCR_USERNAME --docker-password=$GHCR_TOKEN --docker-email=$GHCR_EMAIL

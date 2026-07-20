@@ -1,0 +1,33 @@
+#cloud-config
+hostname: ${jsonencode(hostname)}
+
+users:
+  - name: ${jsonencode(username)}
+    groups: [adm, sudo]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - ${jsonencode(ssh_public_key)}
+
+%{ if vm_password != null ~}
+ssh_pwauth: true
+chpasswd:
+  expire: false
+  users:
+    - name: ${jsonencode(username)}
+      password: ${jsonencode(vm_password)}
+      type: text
+%{ endif ~}
+
+packages:
+  - curl
+
+write_files:
+  - path: /etc/rancher/k3s/config.yaml
+    permissions: "0600"
+    content: |
+      token: ${jsonencode(k3s_token)}
+      ${indent(6, k3s_config)}
+
+runcmd:
+  - curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC=${install_exec} sh -

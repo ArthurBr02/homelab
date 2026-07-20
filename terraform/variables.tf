@@ -21,6 +21,12 @@ variable "proxmox_insecure" {
   default     = true
 }
 
+variable "proxmox_ssh_username" {
+  description = "Utilisateur SSH employé par le provider pour envoyer les snippets Cloud-Init."
+  type        = string
+  default     = "root"
+}
+
 variable "proxmox_node_name" {
   description = "Nœud Proxmox qui héberge les VMs."
   type        = string
@@ -42,13 +48,13 @@ variable "proxmox_network_bridge" {
 variable "proxmox_network_gateway" {
   description = "Passerelle IPv4 utilisée par les VMs."
   type        = string
-  default     = "192.168.1.1"
+  default     = "192.168.1.254"
 }
 
 variable "proxmox_dns_servers" {
   description = "Serveurs DNS utilisés par les VMs."
   type        = list(string)
-  default     = ["192.168.1.1"]
+  default     = ["192.168.1.254"]
 }
 
 variable "template_vm_id" {

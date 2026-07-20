@@ -6,8 +6,8 @@ proxmox_api_token_id     = "terraform@pve!homelab"
 proxmox_api_token_secret = "remplacer-par-le-secret"
 
 # Valeurs réseau facultatives : les valeurs ci-dessous sont déjà les valeurs par défaut.
-proxmox_network_gateway = "192.168.1.1"
-proxmox_dns_servers     = ["192.168.1.1"]
+proxmox_network_gateway = "192.168.1.254"
+proxmox_dns_servers     = ["192.168.1.254"]
 
 vm_ipv4_addresses = {
   control_plane = "192.168.1.100/24"

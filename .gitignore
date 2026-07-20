@@ -4,5 +4,8 @@
 crash.log
 *.tfvars
 !*.tfvars.example
+*.generated.yaml
 *secret.yaml
+*secrets.yaml
 .env
+auth-ghcr-io.sh

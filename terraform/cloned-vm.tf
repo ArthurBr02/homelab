@@ -67,13 +67,14 @@ resource "proxmox_virtual_environment_vm" "k3s" {
 
   network_device {
     bridge   = var.proxmox_network_bridge
-    firewall = true
+    firewall = false
     model    = "virtio"
   }
 
   initialization {
     datastore_id = var.proxmox_datastore_id
     interface    = "ide0"
+    user_data_file_id = proxmox_virtual_environment_file.cloud_init[each.key].id
 
     user_account {
       username = var.vm_username

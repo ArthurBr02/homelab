@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bot-maison
+spec:
+  selector:
+    matchLabels:
+      app: bot-maison
+  template:
+    metadata:
+      labels:
+        app: bot-maison
+    spec:
+      imagePullSecrets:
+      - name: ghcr-login-secret
+      containers:
+      - name: bot-maison
+        image: ghcr.io/arthurbr02/bot-maison:latest
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "500m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        env:
+        - name: DISCORD_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: bot-maison-secret
+              key: token

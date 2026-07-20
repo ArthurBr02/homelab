@@ -17,11 +17,25 @@ Cette configuration clone le template Ubuntu Cloud-Init `9000` pour créer :
 | `variables.tf` | Déclare les paramètres modifiables : nœud, stockage, réseau, template, IDs, ressources et accès aux VMs. Il valide aussi les valeurs comme l'unicité des IDs. |
 | `cloned-vm.tf` | Décrit les trois VMs. Une ressource avec `for_each` clone le template `9000` pour créer la cheffe et les deux ouvrières avec Cloud-Init et DHCP. |
 | `outputs.tf` | Affiche après le déploiement l'ID, le nom et les adresses IPv4 détectées pour chaque VM. |
+| `cloud-init.tf` | Rend les templates avec `local_sensitive_file`, puis envoie les snippets à Proxmox avec `source_file`. |
 | `terraform.tfvars.example` | Sert de modèle pour créer le fichier local `terraform.tfvars` contenant l'URL et le jeton Proxmox. |
 | `.terraform.lock.hcl` | Enregistre la version exacte du provider installée afin que tous les futurs déploiements utilisent la même version. Ce fichier doit être versionné. |
 | `README.md` | Documente l'architecture, les fichiers et les commandes d'utilisation. |
 
 Le fichier `terraform.tfstate`, créé lors du premier `apply`, est ignoré par Git, car il peut contenir des informations sensibles.
+
+L'envoi des snippets Cloud-Init nécessite également un accès SSH à l'hôte Proxmox. Le provider utilise `root` et les clés chargées dans l'agent SSH local :
+
+```bash
+ssh-add ~/.ssh/id_rsa
+ssh root@192.168.1.32
+```
+
+La deuxième commande doit fonctionner sans demander le mot de passe de `root` avant de lancer `tofu apply`.
+
+Les snippets utilisent `source_file` avec `upload_mode = "sftp"`. Ce mode évite de transmettre le YAML sur le stdin du shell `zsh` de `root`, qui interpréterait son contenu comme des commandes sur l'hôte Proxmox.
+
+Les fichiers locaux `*.generated.yaml` contiennent le token k3s et éventuellement le mot de passe de la VM. Ils sont créés avec les permissions `0600` et ignorés par Git.
 
 ## Configurer les secrets
 
@@ -98,6 +112,6 @@ Les valeurs non secrètes peuvent aussi être surchargées dans un fichier `terr
 
 ## Configuration réseau
 
-Les trois VMs utilisent des adresses statiques sur le réseau `192.168.1.0/24`, avec `192.168.1.1` comme passerelle et serveur DNS par défaut. Ces valeurs sont définies par `vm_ipv4_addresses`, `proxmox_network_gateway` et `proxmox_dns_servers` dans `variables.tf`.
+Les trois VMs utilisent des adresses statiques sur le réseau `192.168.1.0/24`, avec `192.168.1.254` comme passerelle et serveur DNS par défaut. Ces valeurs sont définies par `vm_ipv4_addresses`, `proxmox_network_gateway` et `proxmox_dns_servers` dans `variables.tf`.
 
 Vérifier que les adresses `.100`, `.101` et `.102` sont exclues de la plage DHCP ou réservées avant d'appliquer la configuration.
