@@ -1,2 +1,2 @@
 terraform.tfstate
-*.secret.yaml
+*secret.yaml
