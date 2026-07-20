@@ -39,6 +39,18 @@ variable "proxmox_network_bridge" {
   default     = "vmbr0"
 }
 
+variable "proxmox_network_gateway" {
+  description = "Passerelle IPv4 utilisée par les VMs."
+  type        = string
+  default     = "192.168.1.1"
+}
+
+variable "proxmox_dns_servers" {
+  description = "Serveurs DNS utilisés par les VMs."
+  type        = list(string)
+  default     = ["192.168.1.1"]
+}
+
 variable "template_vm_id" {
   description = "ID du template Ubuntu 24.04 Cloud-Init."
   type        = number
@@ -54,6 +66,54 @@ variable "vm_cpu_cores" {
     condition     = var.vm_cpu_cores >= 1
     error_message = "Chaque VM doit avoir au moins un vCPU."
   }
+}
+
+variable "vm_ipv4_addresses" {
+  description = "Adresses IPv4 statiques des trois VMs, au format CIDR."
+  type = object({
+    control_plane = string
+    worker_1      = string
+    worker_2      = string
+  })
+  default = {
+    control_plane = "192.168.1.100/24"
+    worker_1      = "192.168.1.101/24"
+    worker_2      = "192.168.1.102/24"
+  }
+
+  validation {
+    condition = length(distinct([
+      var.vm_ipv4_addresses.control_plane,
+      var.vm_ipv4_addresses.worker_1,
+      var.vm_ipv4_addresses.worker_2,
+    ])) == 3
+    error_message = "Les trois adresses IPv4 doivent être différentes."
+  }
+}
+
+variable "vm_username" {
+  description = "Utilisateur créé par Cloud-Init dans chaque VM."
+  type        = string
+  default     = "ubuntu"
+}
+
+variable "ssh_public_key_path" {
+  description = "Chemin local de la clé publique autorisée à se connecter aux VMs."
+  type        = string
+  default     = "~/.ssh/id_rsa.pub"
+
+  validation {
+    condition     = fileexists(pathexpand(var.ssh_public_key_path))
+    error_message = "Le fichier défini par ssh_public_key_path doit exister."
+  }
+}
+
+variable "vm_password" {
+  description = "Mot de passe facultatif pour se connecter depuis la console Proxmox."
+  type        = string
+  default     = null
+  sensitive   = true
+  nullable    = true
 }
 
 variable "vm_memory_mb" {
@@ -97,4 +157,10 @@ variable "vm_ids" {
     ])) == 3
     error_message = "Les trois IDs de VM doivent être différents."
   }
+}
+
+variable "k3s_token" {
+  description = "Jeton partagé par les nœuds du cluster k3s."
+  type        = string
+  sensitive   = true
 }

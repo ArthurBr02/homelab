@@ -2,11 +2,11 @@
 
 Cette configuration clone le template Ubuntu Cloud-Init `9000` pour créer :
 
-| ID | Nom | Rôle | vCPU | RAM |
-| ---: | --- | --- | ---: | ---: |
-| 100 | `k3s-control-plane-1` | Control plane | 2 | 4 096 Mo |
-| 101 | `k3s-worker-1` | Worker | 2 | 4 096 Mo |
-| 102 | `k3s-worker-2` | Worker | 2 | 4 096 Mo |
+| ID | Nom | Rôle | Adresse IPv4 | vCPU | RAM |
+| ---: | --- | --- | --- | ---: | ---: |
+| 9001 | `k3s-control-plane-1` | Control plane | `192.168.1.100/24` | 2 | 4 096 Mo |
+| 9002 | `k3s-worker-1` | Worker | `192.168.1.101/24` | 2 | 4 096 Mo |
+| 9003 | `k3s-worker-2` | Worker | `192.168.1.102/24` | 2 | 4 096 Mo |
 
 ## Rôle des fichiers
 
@@ -14,7 +14,7 @@ Cette configuration clone le template Ubuntu Cloud-Init `9000` pour créer :
 | --- | --- |
 | `versions.tf` | Définit la version minimale de Terraform/OpenTofu et verrouille le provider `bpg/proxmox` sur la série `0.111.x`. |
 | `provider.tf` | Configure la connexion à l'API Proxmox avec l'URL et le jeton fournis par les variables Terraform. |
-| `variables.tf` | Déclare les paramètres modifiables : nœud, stockage, bridge réseau, template, IDs, nombre de vCPU et quantité de RAM. Il valide aussi les valeurs sensibles, comme l'unicité des IDs. |
+| `variables.tf` | Déclare les paramètres modifiables : nœud, stockage, réseau, template, IDs, ressources et accès aux VMs. Il valide aussi les valeurs comme l'unicité des IDs. |
 | `cloned-vm.tf` | Décrit les trois VMs. Une ressource avec `for_each` clone le template `9000` pour créer la cheffe et les deux ouvrières avec Cloud-Init et DHCP. |
 | `outputs.tf` | Affiche après le déploiement l'ID, le nom et les adresses IPv4 détectées pour chaque VM. |
 | `terraform.tfvars.example` | Sert de modèle pour créer le fichier local `terraform.tfvars` contenant l'URL et le jeton Proxmox. |
@@ -51,6 +51,30 @@ export TF_VAR_proxmox_api_token_id="terraform@pve!homelab"
 export TF_VAR_proxmox_api_token_secret="secret-du-token"
 ```
 
+## Accéder aux VMs
+
+Terraform injecte la clé publique `~/.ssh/id_rsa.pub` dans le compte `ubuntu`. Le chemin se modifie dans `terraform.tfvars` si une autre clé doit être utilisée :
+
+```hcl
+ssh_public_key_path = "~/.ssh/id_rsa.pub"
+```
+
+Après le déploiement, se connecter en SSH :
+
+```bash
+ssh ubuntu@192.168.1.100
+ssh ubuntu@192.168.1.101
+ssh ubuntu@192.168.1.102
+```
+
+La console Proxmox utilise un port série déclaré dans `cloned-vm.tf`. Pour pouvoir s'y authentifier avec `ubuntu`, définir également un mot de passe local dans `terraform.tfvars` :
+
+```hcl
+vm_password = "remplacer-par-un-mot-de-passe-fort"
+```
+
+Le mot de passe est marqué comme sensible, mais reste présent dans `terraform.tfvars` et dans le state. La connexion SSH par clé reste préférable.
+
 ## Utilisation
 
 ```bash
@@ -71,3 +95,9 @@ tofu apply -var='vm_memory_mb={control_plane=4096,worker=8192}'
 ```
 
 Les valeurs non secrètes peuvent aussi être surchargées dans un fichier `terraform.tfvars`.
+
+## Configuration réseau
+
+Les trois VMs utilisent des adresses statiques sur le réseau `192.168.1.0/24`, avec `192.168.1.1` comme passerelle et serveur DNS par défaut. Ces valeurs sont définies par `vm_ipv4_addresses`, `proxmox_network_gateway` et `proxmox_dns_servers` dans `variables.tf`.
+
+Vérifier que les adresses `.100`, `.101` et `.102` sont exclues de la plage DHCP ou réservées avant d'appliquer la configuration.

@@ -4,3 +4,19 @@
 proxmox_endpoint         = "https://proxmox.example.com:8006"
 proxmox_api_token_id     = "terraform@pve!homelab"
 proxmox_api_token_secret = "remplacer-par-le-secret"
+
+# Valeurs réseau facultatives : les valeurs ci-dessous sont déjà les valeurs par défaut.
+proxmox_network_gateway = "192.168.1.1"
+proxmox_dns_servers     = ["192.168.1.1"]
+
+vm_ipv4_addresses = {
+  control_plane = "192.168.1.100/24"
+  worker_1      = "192.168.1.101/24"
+  worker_2      = "192.168.1.102/24"
+}
+
+# Accès aux VMs. Le mot de passe est facultatif si la connexion SSH suffit.
+ssh_public_key_path = "~/.ssh/id_rsa.pub"
+# vm_password       = "remplacer-par-un-mot-de-passe-fort"
+
+k3s_token = "remplacer-par-le-secret-k3s"

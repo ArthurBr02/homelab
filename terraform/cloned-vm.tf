@@ -1,22 +1,25 @@
 locals {
   k3s_vms = {
     control_plane = {
-      memory_mb = var.vm_memory_mb.control_plane
-      name      = "k3s-control-plane-1"
-      role      = "control-plane"
-      vm_id     = var.vm_ids.control_plane
+      ipv4_address = var.vm_ipv4_addresses.control_plane
+      memory_mb    = var.vm_memory_mb.control_plane
+      name         = "k3s-control-plane-1"
+      role         = "control-plane"
+      vm_id        = var.vm_ids.control_plane
     }
     worker_1 = {
-      memory_mb = var.vm_memory_mb.worker
-      name      = "k3s-worker-1"
-      role      = "worker"
-      vm_id     = var.vm_ids.worker_1
+      ipv4_address = var.vm_ipv4_addresses.worker_1
+      memory_mb    = var.vm_memory_mb.worker
+      name         = "k3s-worker-1"
+      role         = "worker"
+      vm_id        = var.vm_ids.worker_1
     }
     worker_2 = {
-      memory_mb = var.vm_memory_mb.worker
-      name      = "k3s-worker-2"
-      role      = "worker"
-      vm_id     = var.vm_ids.worker_2
+      ipv4_address = var.vm_ipv4_addresses.worker_2
+      memory_mb    = var.vm_memory_mb.worker
+      name         = "k3s-worker-2"
+      role         = "worker"
+      vm_id        = var.vm_ids.worker_2
     }
   }
 }
@@ -54,6 +57,14 @@ resource "proxmox_virtual_environment_vm" "k3s" {
     dedicated = each.value.memory_mb
   }
 
+  serial_device {
+    device = "socket"
+  }
+
+  vga {
+    type = "serial0"
+  }
+
   network_device {
     bridge   = var.proxmox_network_bridge
     firewall = true
@@ -64,9 +75,22 @@ resource "proxmox_virtual_environment_vm" "k3s" {
     datastore_id = var.proxmox_datastore_id
     interface    = "ide0"
 
+    user_account {
+      username = var.vm_username
+      password = var.vm_password
+      keys = [
+        trimspace(file(pathexpand(var.ssh_public_key_path))),
+      ]
+    }
+
+    dns {
+      servers = var.proxmox_dns_servers
+    }
+
     ip_config {
       ipv4 {
-        address = "dhcp"
+        address = each.value.ipv4_address
+        gateway = var.proxmox_network_gateway
       }
     }
   }
