@@ -1,6 +1,18 @@
-#!/bin/sh
-export GHCR_USERNAME=<username>
-export GHCR_TOKEN=<token>
-export GHCR_EMAIL=<email>
+#!/usr/bin/env sh
 
-kubectl create secret docker-registry ghcr-login-secret --docker-server=https://ghcr.io --docker-username=$GHCR_USERNAME --docker-password=$GHCR_TOKEN --docker-email=$GHCR_EMAIL
+set -eu
+
+# Définir ces variables dans le shell avant d'exécuter ce script.
+# Le token doit être un GitHub PAT classique avec le scope read:packages.
+: "${GHCR_USERNAME:?Variable GHCR_USERNAME manquante}"
+: "${GHCR_TOKEN:?Variable GHCR_TOKEN manquante}"
+: "${GHCR_EMAIL:?Variable GHCR_EMAIL manquante}"
+
+kubectl create secret docker-registry ghcr-login-secret \
+  --docker-server=ghcr.io \
+  --docker-username="$GHCR_USERNAME" \
+  --docker-password="$GHCR_TOKEN" \
+  --docker-email="$GHCR_EMAIL" \
+  --dry-run=client \
+  --output=yaml \
+  | sudo kubectl apply --filename=-
