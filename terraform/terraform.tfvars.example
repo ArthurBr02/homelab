@@ -1,0 +1,6 @@
+# Copier ce fichier vers terraform.tfvars, puis remplacer les valeurs.
+# terraform.tfvars est ignoré par Git et ne doit jamais être commité.
+
+proxmox_endpoint         = "https://proxmox.example.com:8006"
+proxmox_api_token_id     = "terraform@pve!homelab"
+proxmox_api_token_secret = "remplacer-par-le-secret"
