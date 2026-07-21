@@ -18,7 +18,7 @@ spec:
         image: ghcr.io/arthurbr02/bot-maison:latest
         resources:
           requests:
-            memory: "128Mi"
+            memory: "64Mi"
             cpu: "500m"
           limits:
             memory: "256Mi"
