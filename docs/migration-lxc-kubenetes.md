@@ -470,8 +470,11 @@ Argo CD lit le dépôt Git et applique tout seul son contenu au cluster. C'est l
        repoURL: https://github.com/arthurbr02/homelab.git
        targetRevision: main
        path: kubernetes/apps
+       directory:
+         recurse: true
      destination:
        server: https://kubernetes.default.svc
+       namespace: default
      syncPolicy:
        automated:
          prune: true
@@ -479,6 +482,11 @@ Argo CD lit le dépôt Git et applique tout seul son contenu au cluster. C'est l
    ```
 
    `prune: true` supprime ce qui n'est plus dans Git ; `selfHeal: true` annule toute modification faite à la main dans le cluster. Git redevient la seule source de vérité.
+
+   > Deux réglages faciles à oublier, qui donnent une app racine « Synced » mais vide :
+   >
+   > - `directory.recurse: true` : sans lui, Argo CD ne lit que les YAML **directement** dans `kubernetes/apps/`, et ignore les sous-dossiers comme `kubernetes/apps/bot-maison/`. Résultat : arbre vide, aucune ressource déployée.
+   > - `destination.namespace` : les manifestes du bot n'indiquent pas de namespace. Argo CD a besoin d'une cible, sinon il refuse la ressource avec `InvalidSpecError: Namespace ... is missing`.
 
 6. Appliquer une seule fois cette application racine :
 
