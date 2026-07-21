@@ -518,7 +518,7 @@ L'idée : produire le `Secret` en clair **localement**, le chiffrer immédiateme
      --docker-email="$GHCR_EMAIL" \
      --dry-run=client -o yaml \
      | kubeseal --format yaml \
-     > kubernetes/apps/bot-maison/ghcr-login-sealed.yaml
+     > kubernetes/apps/auth/ghcr-login-sealed.yaml
    ```
 
    `--dry-run=client` génère le YAML sans rien créer dans le cluster ; le tube l'envoie directement à `kubeseal`.

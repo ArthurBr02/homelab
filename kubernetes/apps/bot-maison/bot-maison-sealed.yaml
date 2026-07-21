@@ -1,0 +1,13 @@
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: bot-maison-secret
+  namespace: default
+spec:
+  encryptedData:
+    token: AgBQ5o+/pKqSvauL4O2jetsIk1zczg7KXc/yOMm96uguwCenv/3lksjxMzR8XzSppdqTFjsOAXj/N64dAN1v+PbMHxZRd1M2+mqS4Bf4yev1AjbgIfBPC840EFeB6sWOO/tZf14RrcWCPBZMdLoSL5MnHIoKMrOLeKGxh/9tAkfm+pQsPpISYKBh0N7G2TiUVsdH8CM0ZpcEY+HOEAvdMqL9YjFiCVJdljmXcsyT17VB8C/n575ZaFRhp/BXdObf56jQBsurk+yzL5vL6+YY0P/68RCiHG0VCzZ5w9/Tivt3Cvj+/FcwX7mI3d56K0ltMHi6iGifNr3Wj9hFPWr4tpOiFU/vwKtGBCFr1lOp/A05Enxof61AB9ttMbHmlE3EFjGLHY0EaWGFbunzAleUThtJ3e/GsCli//TjMU+OjHAdOSeSSKe8HLHPiIR0oZJfntvH4ynIKg/IoxSWyE9mMdVWA6d0kXocyBPNjOqZz74tVM+el1im4pepZqJglgXkr/LLlk19ftmIqb8J+xtKpZOkfCEPgYQnm8rrbDd77eFPUZyHm+4+X9S+V5WLHCGf1jzMvBUxSw7LbqZn3X2RUVoCvzv4tywdhZilaHXsQoBNBMgQ4rk9CN4IZ77PjWjATqtVoEagecw3NJ9HAbGnVH+8Fbf6CI6GkwbhEsSdyaY7MoEfdDm6hHS/lkA92gB2sRNnPzPRHgwxEA+S+qygGkM1TgcxXVAbZL+UrdpH2QfyxfNR3hJ47ID8VEJ7rAUcACCpxOuNIj4d5V3QgIQwi5oPUIqVeWpu7sY=
+  template:
+    metadata:
+      name: bot-maison-secret
+      namespace: default
