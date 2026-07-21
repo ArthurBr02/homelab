@@ -378,13 +378,221 @@ Lors du remplacement d'un serveur, celui-ci doit rejoindre l'adresse virtuelle d
 
 ## 7. Passer en pilote automatique
 
+Objectif : que **rien** ne vive uniquement dans une VM. Si une machine, ou le cluster entier, est reconstruite, tout doit se reconstituer à partir de Git.
+
 - Installer Argo CD dans le cluster et le relier au dépôt Git. Son rôle est de garder le cluster identique à ce que Git décrit.
-- Installer Sealed Secrets afin de chiffrer les tokens Discord et les mots de passe avant de les commiter.
+- Installer Sealed Secrets afin de chiffrer les tokens Discord et les identifiants avant de les commiter.
 - Confier à Argo CD le bot créé à l'étape précédente.
+
+### Comprendre ce qui persiste et ce qui disparaît
+
+Le problème actuel : le bot a été démarré à la main. Son `deployment.yaml` est bien dans Git, mais ses **secrets** ont été créés en impératif directement sur le control plane :
+
+- `kubernetes/auth/auth-ghcr-io.sh` crée le secret `ghcr-login-secret` avec des variables d'environnement, sans jamais toucher Git ;
+- `kubernetes/apps/bot-maison/bot-maison-secret.yaml` contient le token Discord, mais il est **ignoré par Git** (`*secret.yaml` dans `.gitignore`).
+
+Ces secrets ne vivent donc qu'à deux endroits : l'`etcd` du cluster et des fichiers locaux sur la VM. Les deux disparaissent à la reconstruction.
+
+| Élément | Où il vit aujourd'hui | Survit à une reconstruction ? |
+| --- | --- | --- |
+| `deployment.yaml` du bot | Git | Oui |
+| Configuration Terraform, Cloud-Init | Git | Oui |
+| `ghcr-login-secret` (identifiant GHCR) | `etcd` + script local | **Non** |
+| `bot-maison-secret` (token Discord) | `etcd` + fichier gitignoré | **Non** |
+| État Kubernetes (`etcd`) du control plane | VM control plane uniquement | **Non** (voir la mise en garde plus bas) |
+
+L'objectif de cette étape est de faire passer chaque ligne de ce tableau à « Oui ».
+
+### Installer Argo CD
+
+Argo CD lit le dépôt Git et applique tout seul son contenu au cluster. C'est lui qui remplace les `kubectl apply` manuels.
+
+1. Créer son namespace et l'installer depuis le manifeste officiel :
+
+   ```bash
+   kubectl create namespace argocd
+   kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+   ```
+
+   > Cette commande d'installation est le seul geste manuel restant. Note-la dans `kubernetes/argocd/README.md` : après une reconstruction totale, c'est la première chose à rejouer, avant qu'Argo CD ne reprenne la main sur le reste.
+
+2. Récupérer le mot de passe administrateur initial :
+
+   ```bash
+   kubectl -n argocd get secret argocd-initial-admin-secret \
+     -o jsonpath="{.data.password}" | base64 -d
+   ```
+
+3. Ouvrir l'interface depuis l'extérieur du réseau, via un tunnel SSH.
+
+   Par défaut, le serveur Argo CD n'est pas exposé (service `ClusterIP`). La commande `kubectl port-forward` publie le port sur le `localhost` de la machine où elle s'exécute — le control plane — et non sur ton poste distant. Un tunnel SSH relie les deux sans rien exposer sur le réseau.
+
+   Depuis ton poste distant, ouvrir le tunnel vers le control plane :
+
+   ```bash
+   ssh -L 8080:localhost:8080 ubuntu@192.168.1.100
+   ```
+
+   Dans cette même session SSH (donc sur le control plane), lancer le port-forward :
+
+   ```bash
+   kubectl port-forward -n argocd svc/argocd-server 8080:443
+   ```
+
+   Laisser les deux commandes actives, puis ouvrir `https://localhost:8080` dans le navigateur du poste distant. Le chemin est : navigateur → `localhost:8080` (tunnel SSH) → `localhost:8080` du control plane (port-forward) → service Argo CD.
+
+   - Certificat auto-signé : accepter l'avertissement du navigateur.
+   - Utilisateur : `admin`.
+   - Mot de passe : la valeur récupérée à l'étape précédente.
+
+   > Cet accès est temporaire : il ne dure que le temps où les deux commandes tournent, et rien n'est publié sur le réseau. Exposer Argo CD en permanence (via un Ingress derrière le Nginx Proxy Manager de la LXC 111) est une décision à part, car cela met l'interface d'administration face au réseau. À décider plus tard, pas maintenant.
+
+4. Après la première connexion, changer le mot de passe puis supprimer le secret initial devenu inutile :
+
+   ```bash
+   argocd account update-password
+   kubectl -n argocd delete secret argocd-initial-admin-secret
+   ```
+
+   > `argocd account update-password` nécessite le client `argocd` (`brew install argocd`), connecté via `argocd login localhost:8080 --username admin --insecure` pendant que le tunnel est ouvert. On peut aussi changer le mot de passe directement dans l'interface web (User Info → Update Password).
+
+5. Déclarer une application racine (patron « app of apps ») qui pointe Argo CD vers le dossier `kubernetes/` du dépôt. Créer `kubernetes/argocd/root-app.yaml` :
+
+   ```yaml
+   apiVersion: argoproj.io/v1alpha1
+   kind: Application
+   metadata:
+     name: root
+     namespace: argocd
+   spec:
+     project: default
+     source:
+       repoURL: https://github.com/arthurbr02/homelab.git
+       targetRevision: main
+       path: kubernetes/apps
+     destination:
+       server: https://kubernetes.default.svc
+     syncPolicy:
+       automated:
+         prune: true
+         selfHeal: true
+   ```
+
+   `prune: true` supprime ce qui n'est plus dans Git ; `selfHeal: true` annule toute modification faite à la main dans le cluster. Git redevient la seule source de vérité.
+
+6. Appliquer une seule fois cette application racine :
+
+   ```bash
+   kubectl apply -f kubernetes/argocd/root-app.yaml
+   ```
+
+   À partir de là, Argo CD déploie et surveille tout ce qui se trouve sous `kubernetes/apps/`.
+
+### Installer Sealed Secrets
+
+Un `Secret` Kubernetes classique n'est **pas** chiffré : sa valeur est seulement encodée en base64, donc lisible par quiconque. On ne peut pas le commiter tel quel. Sealed Secrets résout ça : un contrôleur dans le cluster détient une clé privée, et l'outil `kubeseal` chiffre les secrets avec la clé publique correspondante. Le résultat chiffré (`SealedSecret`) peut être poussé dans Git sans risque ; seul le contrôleur peut le déchiffrer.
+
+1. Installer le contrôleur dans le cluster :
+
+   ```bash
+   kubectl apply -f https://github.com/bitnami-labs/sealed-secrets/releases/latest/download/controller.yaml
+   ```
+
+2. Installer l'outil `kubeseal` sur ton PC (celui qui a accès à `kubectl`) :
+
+   ```bash
+   brew install kubeseal
+   ```
+
+### Convertir les secrets manuels en Sealed Secrets
+
+L'idée : produire le `Secret` en clair **localement**, le chiffrer immédiatement avec `kubeseal`, ne commiter que la version chiffrée, puis jeter la version en clair. Le secret en clair ne touche jamais Git ni le disque durablement.
+
+1. **Identifiant GHCR.** Remplacer l'exécution du script `auth-ghcr-io.sh` par un `SealedSecret` versionné :
+
+   ```bash
+   kubectl create secret docker-registry ghcr-login-secret \
+     --docker-server=https://ghcr.io \
+     --docker-username="$GHCR_USERNAME" \
+     --docker-password="$GHCR_TOKEN" \
+     --docker-email="$GHCR_EMAIL" \
+     --dry-run=client -o yaml \
+     | kubeseal --format yaml \
+     > kubernetes/apps/bot-maison/ghcr-login-sealed.yaml
+   ```
+
+   `--dry-run=client` génère le YAML sans rien créer dans le cluster ; le tube l'envoie directement à `kubeseal`.
+
+2. **Token Discord.** Même principe à partir du secret existant :
+
+   ```bash
+   kubectl create secret generic bot-maison-secret \
+     --from-literal=token="$DISCORD_TOKEN" \
+     --dry-run=client -o yaml \
+     | kubeseal --format yaml \
+     > kubernetes/apps/bot-maison/bot-maison-sealed.yaml
+   ```
+
+3. Commiter les deux fichiers `*-sealed.yaml`. Ils sont chiffrés, donc sûrs dans Git.
+
+   > Vérifier que le motif `*sealed.yaml` n'est **pas** attrapé par le `.gitignore`. La règle actuelle `*secret.yaml` ne bloque pas `*-sealed.yaml`, mais garde ce point en tête si tu renommes les fichiers.
+
+4. Une fois les `SealedSecret` en place et déployés par Argo CD, le script `auth-ghcr-io.sh` et le fichier `bot-maison-secret.yaml` ne servent plus qu'à la génération. Ils peuvent rester en `.example`, mais ne sont plus nécessaires au fonctionnement du cluster.
+
+### Sauvegarder la clé de déchiffrement Sealed Secrets
+
+C'est le point le plus important, et celui qu'on oublie presque toujours.
+
+Les `SealedSecret` dans Git ne sont déchiffrables que par **la clé privée du contrôleur Sealed Secrets**. Cette clé est générée aléatoirement à la première installation et vit dans l'`etcd` du cluster. Si le cluster est reconstruit de zéro, le contrôleur génère une **nouvelle** clé, incompatible avec les `SealedSecret` déjà chiffrés. Résultat : Git est intact, mais plus aucun secret ne peut être relu.
+
+Il faut donc sauvegarder cette clé **hors du cluster**.
+
+1. Exporter la clé (elle porte un label dédié) :
+
+   ```bash
+   kubectl get secret -n kube-system \
+     -l sealedsecrets.bitnami.com/sealed-secrets-key=active \
+     -o yaml > sealed-secrets-key-backup.yaml
+   ```
+
+2. Stocker `sealed-secrets-key-backup.yaml` dans un endroit chiffré et **hors du cluster** : gestionnaire de mots de passe, ou fichier chiffré (`age`, `gpg`) sur un disque séparé.
+
+   > Ne jamais commiter ce fichier dans Git. Il contient la clé privée en clair : quiconque l'obtient peut déchiffrer tous tes `SealedSecret`. C'est l'exact opposé des `SealedSecret` eux-mêmes, qui, eux, sont faits pour aller dans Git.
+
+3. **Restauration**, sur un cluster reconstruit, avant de laisser Argo CD synchroniser :
+
+   ```bash
+   kubectl apply -f sealed-secrets-key-backup.yaml
+   kubectl delete pod -n kube-system -l name=sealed-secrets-controller
+   ```
+
+   Le contrôleur redémarre avec l'ancienne clé et redevient capable de déchiffrer les `SealedSecret` du dépôt.
+
+### Mise en garde : reconstruction complète du cluster
+
+Tant que le cluster tourne avec un **seul** nœud `server`, reconstruire cette VM détruit l'`etcd`, donc tout l'état Kubernetes. Argo CD et Sealed Secrets réparent la partie « configuration et secrets », mais pas la perte de l'`etcd` lui-même.
+
+Deux protections, complémentaires, déjà prévues plus haut :
+
+- **Restaurer un snapshot etcd** (voir « Prévoir la haute disponibilité » à l'étape 4) rétablit l'état exact du cluster ;
+- **Passer à trois nœuds `server`** avec l'etcd embarqué : la perte d'une VM ne fait plus perdre l'état, les deux autres nœuds le conservent.
+
+La chaîne de récupération complète après une perte devient :
+
+```text
+Terraform recrée les VMs
+  → Cloud-Init réinstalle k3s (+ restauration d'un snapshot etcd si nécessaire)
+  → réinstallation manuelle d'Argo CD
+  → restauration de la clé Sealed Secrets depuis la sauvegarde hors cluster
+  → Argo CD resynchronise apps + SealedSecret depuis Git
+  → les secrets sont déchiffrés, les applications redémarrent
+```
 
 ### Validation
 
-Modifier le YAML du bot, pousser le changement et vérifier qu'Argo CD le déploie sans utiliser `kubectl`.
+1. **Reproductibilité des applications.** Modifier le YAML du bot, pousser le changement et vérifier qu'Argo CD le déploie sans utiliser `kubectl`.
+2. **Reproductibilité des secrets.** Supprimer à la main le secret déchiffré (`kubectl delete secret bot-maison-secret`) et vérifier que Sealed Secrets le régénère à partir du `SealedSecret` du dépôt.
+3. **Test de la sauvegarde de clé.** Sur un cluster de test jetable : chiffrer un secret, supprimer le contrôleur et sa clé, restaurer la clé depuis la sauvegarde, et vérifier que le `SealedSecret` redevient déchiffrable. Tant que ce test n'a pas réussi, la sauvegarde n'est pas prouvée.
 
 Désormais, le geste quotidien est :
 
