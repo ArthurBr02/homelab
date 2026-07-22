@@ -547,6 +547,22 @@ L'idée : produire le `Secret` en clair **localement**, le chiffrer immédiateme
 
 4. Une fois les `SealedSecret` en place et déployés par Argo CD, le script `auth-ghcr-io.sh` et le fichier `bot-maison-secret.yaml` ne servent plus qu'à la génération. Ils peuvent rester en `.example`, mais ne sont plus nécessaires au fonctionnement du cluster.
 
+> **Piège de migration : un Secret créé à la main empêche l'adoption.** Si un `Secret` du même nom existait déjà (créé en impératif avant la migration), le contrôleur refuse de l'écraser et le `SealedSecret` reste `Degraded` :
+>
+> ```text
+> failed update: Resource "bot-maison-secret" already exists and is not managed by SealedSecret
+> ```
+>
+> Autoriser le contrôleur à reprendre le Secret existant en l'annotant, puis relancer le contrôleur :
+>
+> ```bash
+> kubectl annotate secret <nom> -n <namespace> \
+>   sealedsecrets.bitnami.com/managed="true" --overwrite
+> kubectl delete pod -n kube-system -l name=sealed-secrets-controller
+> ```
+>
+> Le redémarrage est nécessaire : après plusieurs échecs le contrôleur « abandonne » (`giving up`) et ne retente pas tant que le spec du `SealedSecret` ne change pas (`update suppressed, no changes in spec`). Ce cas ne concerne **que** la migration d'un existant : sur un cluster reconstruit de zéro, aucun Secret manuel n'entre en conflit, le contrôleur crée le Secret du premier coup.
+
 ### Sauvegarder la clé de déchiffrement Sealed Secrets
 
 C'est le point le plus important, et celui qu'on oublie presque toujours.
@@ -576,22 +592,41 @@ Il faut donc sauvegarder cette clé **hors du cluster**.
 
    Le contrôleur redémarre avec l'ancienne clé et redevient capable de déchiffrer les `SealedSecret` du dépôt.
 
-### Mise en garde : reconstruction complète du cluster
+### Récupération après reconstruction
 
-Tant que le cluster tourne avec un **seul** nœud `server`, reconstruire cette VM détruit l'`etcd`, donc tout l'état Kubernetes. Argo CD et Sealed Secrets réparent la partie « configuration et secrets », mais pas la perte de l'`etcd` lui-même.
+Une fois Argo CD et Sealed Secrets en place, la reconstruction d'un cluster neuf ne se « retape » pas à la main : le seul geste manuel est un **bootstrap scripté**, tout le reste découle de Git.
+
+Le script `kubernetes/bootstrap.sh` enchaîne les quatre étapes :
+
+1. installer Argo CD ;
+2. installer le contrôleur Sealed Secrets ;
+3. **restaurer la clé de déchiffrement** depuis la sauvegarde hors cluster, puis relancer le contrôleur ;
+4. appliquer l'application racine `root-app.yaml`, qui met Argo CD au travail.
+
+```bash
+SEALED_SECRETS_KEY_BACKUP=/chemin/vers/sealed-secrets-key-backup.yaml \
+  ./kubernetes/bootstrap.sh
+```
+
+Après ça, Argo CD tire toutes les applications depuis Git et le contrôleur déchiffre tous les `SealedSecret` automatiquement. Rien à re-sceller, aucun secret à recréer à la main.
+
+> Ce script est le point d'entrée unique après une perte. Le garder versionné dans Git ; noter le chemin de la sauvegarde de clé (elle, hors Git). Sans cette clé, l'étape 3 échoue volontairement, car sans elle tous les `SealedSecret` seraient illisibles.
+
+### Mise en garde : ce que Git ne reconstruit pas
+
+Tant que le cluster tourne avec un **seul** nœud `server`, reconstruire cette VM détruit l'`etcd`, donc tout l'état Kubernetes. Argo CD et Sealed Secrets réparent la partie « configuration et secrets », mais pas la perte de l'`etcd` lui-même — l'`etcd` n'est pas dans Git.
 
 Deux protections, complémentaires, déjà prévues plus haut :
 
 - **Restaurer un snapshot etcd** (voir « Prévoir la haute disponibilité » à l'étape 4) rétablit l'état exact du cluster ;
-- **Passer à trois nœuds `server`** avec l'etcd embarqué : la perte d'une VM ne fait plus perdre l'état, les deux autres nœuds le conservent.
+- **Passer à trois nœuds `server`** avec l'etcd embarqué : la perte d'une VM ne fait plus perdre l'état, les deux autres nœuds le conservent. C'est le vrai remède : un nœud peut tomber sans aucune intervention.
 
 La chaîne de récupération complète après une perte devient :
 
 ```text
 Terraform recrée les VMs
   → Cloud-Init réinstalle k3s (+ restauration d'un snapshot etcd si nécessaire)
-  → réinstallation manuelle d'Argo CD
-  → restauration de la clé Sealed Secrets depuis la sauvegarde hors cluster
+  → ./kubernetes/bootstrap.sh (Argo CD + Sealed Secrets + clé + app racine)
   → Argo CD resynchronise apps + SealedSecret depuis Git
   → les secrets sont déchiffrés, les applications redémarrent
 ```
@@ -610,18 +645,216 @@ modifier → commit → push
 
 ## 8. Préparer le stockage des données
 
-- Installer **Longhorn**. Le stockage par défaut de k3s (`local-path`) attache un volume à son nœud ; si le worker tombe, le volume devient indisponible. Longhorn réplique les données au niveau bloc afin que le volume puisse suivre le pod.
-- Installer **MinIO**, ou utiliser un stockage objet existant. Il servira de destination aux sauvegardes des bases de données.
-- Installer l'opérateur **CloudNativePG**. Il gérera PostgreSQL : réplication, bascule, archivage WAL et restauration à un instant donné.
+Trois couches, à installer **dans cet ordre** car chacune dépend de la précédente :
 
-> Ne jamais créer manuellement un `StatefulSet` PostgreSQL.
+1. **Longhorn** — stockage bloc répliqué. Le stockage par défaut de k3s (`local-path`) attache un volume à un seul nœud ; si ce nœud tombe, le volume devient indisponible. Longhorn réplique les données au niveau bloc, pour que le volume suive le pod.
+2. **MinIO** — stockage objet (dans le cluster, sur un volume Longhorn). Destination des sauvegardes de bases de données.
+3. **CloudNativePG** — opérateur PostgreSQL : réplication, bascule, archivage WAL et restauration à un instant donné, avec sauvegardes vers MinIO.
+
+> Tout passe par Argo CD (étape 7). Chaque composant est décrit par une ressource `Application` commitée dans `kubernetes/apps/<composant>/`, que l'app racine déploie automatiquement. On n'installe plus rien avec `helm install` à la main.
+>
+> Une ressource `Application` vit dans le namespace `argocd` : ses manifestes doivent donc porter `metadata.namespace: argocd` explicitement, sinon l'app racine les enverrait dans `default`.
+
+### 8.1 Longhorn (stockage bloc répliqué)
+
+**Prérequis système, dans Cloud-Init.** Longhorn a besoin de `open-iscsi` et `nfs-common` sur chaque nœud. Les ajouter au bloc `packages` de `terraform/cloud-init/k3s.yaml.tftpl` :
+
+```yaml
+packages:
+  - curl
+  - open-iscsi
+  - nfs-common
+```
+
+**Disque dédié pour Longhorn.** Ajouter un second disque à chaque VM dans `terraform/cloned-vm.tf`, distinct du disque système :
+
+```hcl
+disk {
+  datastore_id = var.proxmox_datastore_id
+  interface    = "scsi1"
+  size         = 100           # Go, à ajuster (media-storage = SSD 3.6T, large marge)
+}
+```
+
+Puis, dans Cloud-Init, formater et monter ce disque sur `/var/lib/longhorn` (chemin de données par défaut de Longhorn). Ajouter au template :
+
+```yaml
+disk_setup:
+  /dev/sdb:
+    table_type: gpt
+    layout: true
+fs_setup:
+  - device: /dev/sdb1
+    filesystem: ext4
+mounts:
+  - [/dev/sdb1, /var/lib/longhorn, ext4, "defaults,nofail", "0", "2"]
+```
+
+> Vérifier le nom réel du disque (`/dev/sdb` vs `/dev/vdb`) selon le contrôleur (`scsi` → `sd*`, `virtio` → `vd*`). Un disque dédié isole les données du système et évite qu'une saturation Longhorn ne bloque l'OS.
+
+**Déploiement via Argo CD.** Créer `kubernetes/apps/longhorn/application.yaml` :
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: longhorn
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://charts.longhorn.io
+    chart: longhorn
+    targetRevision: 1.7.2          # épingler une version
+    helm:
+      values: |
+        persistence:
+          defaultClass: true       # Longhorn devient la StorageClass par défaut
+          defaultClassReplicaCount: 3
+        defaultSettings:
+          defaultDataPath: /var/lib/longhorn
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: longhorn-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+> `defaultClass: true` fait de Longhorn la StorageClass par défaut, mais **ne retire pas** le statut par défaut de `local-path` (livré avec k3s) : Kubernetes refuse deux défauts. Retirer celui de `local-path` une fois Longhorn en place :
+>
+> ```bash
+> kubectl patch storageclass local-path \
+>   -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}'
+> ```
+>
+> `defaultClassReplicaCount: 3` = une copie par nœud sur trois serveurs. Descendre à 2 si la place manque.
+
+### 8.2 MinIO (stockage objet, dans le cluster)
+
+Déployé dans le cluster, sur un volume Longhorn. Sert de destination aux sauvegardes de bases de données (**pas** aux snapshots etcd, voir 13.7).
+
+**Identifiants via Sealed Secrets.** Générer le secret racine MinIO scellé (même méthode qu'à l'étape 7) :
+
+```bash
+kubectl create secret generic minio-root \
+  --from-literal=rootUser="admin" \
+  --from-literal=rootPassword="$MINIO_PASSWORD" \
+  --namespace minio --dry-run=client -o yaml \
+  | kubeseal --format yaml \
+  > kubernetes/apps/minio/minio-root-sealed.yaml
+```
+
+**Déploiement via Argo CD.** Créer `kubernetes/apps/minio/application.yaml` (chart MinIO, stockage sur Longhorn, credentials tirées du secret scellé) :
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: minio
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://charts.min.io/
+    chart: minio
+    targetRevision: 5.4.0           # épingler une version
+    helm:
+      values: |
+        mode: standalone            # une instance pour commencer
+        existingSecret: minio-root
+        persistence:
+          enabled: true
+          storageClass: longhorn
+          size: 20Gi
+        buckets:
+          - name: db-backups
+            policy: none
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: minio
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+Commiter d'abord `minio-root-sealed.yaml`, puis `application.yaml`, pour que le secret existe quand le pod démarre.
+
+> `mode: standalone` = une seule instance MinIO. Suffisant pour des sauvegardes de homelab. Passer en mode distribué plus tard si le besoin de résilience objet apparaît.
+
+### 8.3 CloudNativePG (PostgreSQL géré)
+
+Un **opérateur** qui gère PostgreSQL à ta place : réplication, bascule automatique, archivage WAL, restauration à un instant donné. On ne crée jamais un `StatefulSet` PostgreSQL soi-même.
+
+**Installer l'opérateur via Argo CD.** Créer `kubernetes/apps/cloudnative-pg/application.yaml` :
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cloudnative-pg
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://cloudnative-pg.github.io/charts
+    chart: cloudnative-pg
+    targetRevision: 0.23.0          # épingler une version
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cnpg-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+**Définir une base par application.** L'opérateur installé, une base se décrit par une ressource `Cluster`, placée dans le dossier de l'application concernée (une base par app, elles évoluent ensemble). Exemple type, avec sauvegarde vers MinIO :
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: exemple-db
+  namespace: exemple
+spec:
+  instances: 1                      # 1 pour commencer, 2 une fois Longhorn éprouvé (étape 12)
+  storage:
+    size: 10Gi
+    storageClass: longhorn
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://db-backups/exemple-db
+      endpointURL: http://minio.minio.svc:9000
+      s3Credentials:
+        accessKeyId:
+          name: minio-app-creds
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: minio-app-creds
+          key: ACCESS_SECRET_KEY
+    retentionPolicy: "30d"
+```
+
+> Les identifiants d'accès MinIO (`minio-app-creds`) sont un secret : le sceller avec `kubeseal` et le commiter, comme les autres. `instances: 1` au départ ; passer à `2` seulement après avoir validé Longhorn et équipé les nœuds (étape 12).
 
 ### Validation
 
-1. Créer une base de test avec `instances: 1`.
-2. Y insérer des données.
-3. La détruire.
-4. La restaurer depuis une sauvegarde.
+1. **StorageClass par défaut** : `kubectl get storageclass` montre `longhorn (default)` et `local-path` sans le tag `(default)`.
+2. **Volume répliqué** : créer un PVC de test, écrire un fichier, supprimer le pod, le recréer sur un autre nœud, et vérifier que le fichier est toujours là.
+3. **Cycle de sauvegarde/restauration PostgreSQL** :
+   1. Créer une base de test avec `instances: 1`.
+   2. Y insérer des données.
+   3. La détruire.
+   4. La restaurer depuis la sauvegarde MinIO.
 
 > Tant que cette restauration n'a pas fonctionné, ne migrer aucune donnée réelle.
 
@@ -697,3 +930,181 @@ Le dépôt Git décrit-il toute l'infrastructure ?
 ```text
 Machine morte → Terraform recrée la VM → Cloud-Init réinstalle k3s → le nœud rejoint le cluster → Argo CD redéploie le reste
 ```
+
+## 13. Passer à trois serveurs (haute disponibilité)
+
+Jusqu'ici le cluster tourne avec **un** nœud `server` et **deux** `agent`. Perdre le serveur, c'est perdre l'`etcd`, donc tout l'état Kubernetes. Cette étape transforme les deux agents en `server`, pour obtenir **trois nœuds `server` avec etcd embarqué** : le quorum est de 2 sur 3, donc la perte d'une VM ne fait plus rien perdre.
+
+> À faire idéalement **avant** le test de bascule de l'étape 12 : sans HA, ce test n'a pas de sens.
+
+### Prérequis
+
+- Les deux ex-agents disposent d'assez de RAM (cible 8 Go, voir étape 10) : un `server` porte l'API et l'etcd, plus gourmand qu'un simple agent.
+- MinIO est disponible (étape 8) pour y envoyer les snapshots etcd.
+- Avec trois `server`, la distinction « cheffe / ouvrières » disparaît : les trois nœuds ont le même rôle et exécutent aussi les charges applicatives. Revoir la cible RAM en conséquence (trois nœuds équivalents).
+
+### 13.1 Réserver une adresse IP virtuelle pour l'API
+
+Aujourd'hui, tout pointe sur `192.168.1.100`, l'IP du premier serveur. Si ce nœud tombe, cette adresse disparaît. Il faut une **IP virtuelle (VIP)** qui « flotte » sur les trois serveurs, portée par **kube-vip**.
+
+- Choisir une IP libre du réseau, **hors plage DHCP**, par exemple `192.168.1.99`. La réserver dans le Pi-hole / routeur pour qu'aucune autre machine ne la prenne.
+- Cette VIP deviendra l'adresse unique de l'API Kubernetes, pour les nœuds comme pour `kubectl`.
+
+Déclarer la VIP dans `terraform/variables.tf` :
+
+```hcl
+variable "k3s_api_vip" {
+  description = "Adresse IP virtuelle stable de l'API Kubernetes (portée par kube-vip)."
+  type        = string
+  default     = "192.168.1.99"
+}
+```
+
+### 13.2 Rendre le certificat de l'API valide pour la VIP
+
+L'API k3s ne présente un certificat valide que pour les adresses déclarées en `tls-san`. Sans cela, joindre le cluster par la VIP échoue avec une erreur de certificat.
+
+Dans le template `terraform/cloud-init/k3s.yaml.tftpl`, ajouter la VIP au fichier `config.yaml` généré, sur **tous** les nœuds :
+
+```yaml
+write_files:
+  - path: /etc/rancher/k3s/config.yaml
+    permissions: "0600"
+    content: |
+      token: ${jsonencode(k3s_token)}
+      tls-san:
+        - ${jsonencode(k3s_api_vip)}
+      ${indent(6, k3s_config)}
+```
+
+Passer `k3s_api_vip` au template dans `local_sensitive_file.cloud_init` (`terraform/cloud-init.tf`), à côté des autres variables :
+
+```hcl
+k3s_api_vip = var.k3s_api_vip
+```
+
+### 13.3 Déployer kube-vip sur les serveurs
+
+k3s déploie automatiquement tout manifeste déposé dans `/var/lib/rancher/k3s/server/manifests/`. On y place kube-vip pour qu'il monte la VIP dès le démarrage du premier serveur.
+
+Générer le manifeste kube-vip une fois (sur ton PC), en mode ARP, avec l'interface réseau des VMs (souvent `eth0`) :
+
+```bash
+kube-vip manifest daemonset \
+  --interface eth0 \
+  --address 192.168.1.99 \
+  --controlplane \
+  --arp \
+  --leaderElection > terraform/cloud-init/kube-vip.yaml
+```
+
+Puis, dans le template Cloud-Init, écrire ce manifeste **uniquement sur les nœuds `server`**, via `write_files` :
+
+```yaml
+%{ if install_exec == "server" ~}
+  - path: /var/lib/rancher/k3s/server/manifests/kube-vip.yaml
+    permissions: "0644"
+    content: |
+      ${indent(6, kube_vip_manifest)}
+%{ endif ~}
+```
+
+et passer son contenu au template dans `terraform/cloud-init.tf` :
+
+```hcl
+kube_vip_manifest = file("${path.module}/cloud-init/kube-vip.yaml")
+```
+
+### 13.4 Changer le rôle des deux agents
+
+Dans le bloc `locals` de `terraform/cloud-init.tf`, faire passer `worker_1` et `worker_2` de `agent` à `server`, et les faire rejoindre la **VIP** plutôt que l'IP du premier nœud :
+
+```hcl
+locals {
+  k3s_bootstrap = {
+    control_plane = {
+      install_exec = "server"
+      config       = "cluster-init: true"
+    }
+    worker_1 = {
+      install_exec = "server"
+      config       = "server: https://192.168.1.99:6443"
+    }
+    worker_2 = {
+      install_exec = "server"
+      config       = "server: https://192.168.1.99:6443"
+    }
+  }
+}
+```
+
+`control_plane` garde `cluster-init: true` : c'est lui qui initialise l'etcd. Les deux autres le rejoignent via la VIP.
+
+### 13.5 Recréer les nœuds un par un pour garder le quorum
+
+Un nœud `agent` ne se « promeut » pas en `server` sur place : il faut le recréer. Le faire **un à la fois**, en attendant que chaque nouveau serveur soit `Ready` avant de passer au suivant, pour ne jamais casser le quorum etcd.
+
+```bash
+# 1. Appliquer les changements de config (VIP, tls-san, kube-vip, rôles)
+tofu apply
+
+# 2. Recréer le premier ex-agent en serveur
+tofu apply -replace='proxmox_virtual_environment_vm.k3s["worker_1"]'
+# attendre qu'il soit Ready et membre de l'etcd
+kubectl get nodes
+kubectl get --raw='/readyz?verbose'
+
+# 3. Puis le second
+tofu apply -replace='proxmox_virtual_environment_vm.k3s["worker_2"]'
+kubectl get nodes
+```
+
+> Ne jamais recréer les deux en même temps : à un instant donné, il faut au moins deux serveurs etcd vivants pour conserver le quorum.
+
+### 13.6 Basculer kubectl et les agents sur la VIP
+
+Dans le `kubeconfig` local, remplacer l'adresse du serveur par la VIP :
+
+```bash
+kubectl config set-cluster default --server=https://192.168.1.99:6443
+kubectl get nodes
+```
+
+Le résultat doit lister **trois** nœuds `server`, tous `Ready`, avec le rôle `control-plane,etcd,master`.
+
+### 13.7 Sauvegarder l'etcd hors du cluster
+
+Trois serveurs protègent de la perte d'**une** VM. Il reste à couvrir la perte des trois (ou une corruption de l'etcd).
+
+k3s prend **déjà** des snapshots etcd automatiques sur le disque local de chaque serveur :
+
+```text
+/var/lib/rancher/k3s/server/db/snapshots/   (toutes les 12h par défaut, rétention 5)
+```
+
+Ces snapshots locaux dépannent en cas de corruption, mais **disparaissent avec la VM** : un `tofu apply -replace` efface le disque, donc les snapshots. Il faut donc une copie **hors de la VM**. Deux approches simples, à combiner :
+
+1. **Backup Proxmox des trois VMs** (déjà prévu à l'étape 12). Le backup capture le disque entier, snapshots etcd inclus. Restaurer la VM depuis Proxmox = etcd intact, sans rien re-sceller. C'est le plus simple pour ce homelab.
+
+2. **Snapshots vers un stockage objet externe** (facultatif, pour une copie indépendante de Proxmox). Ajouter au `config.yaml` des serveurs (via le template Cloud-Init) :
+
+   ```yaml
+   etcd-snapshot-schedule-cron: "0 */6 * * *"
+   etcd-snapshot-retention: 20
+   etcd-s3: true
+   etcd-s3-endpoint: "s3.exemple.com:9000"
+   etcd-s3-bucket: "etcd-snapshots"
+   etcd-s3-access-key: "<clé>"
+   etcd-s3-secret-key: "<secret>"
+   ```
+
+> **Ne pas viser le MinIO in-cluster** (étape 8.2) comme destination des snapshots etcd : si le cluster meurt, MinIO meurt avec, et le snapshot devient inaccessible au moment précis où il faudrait le lire. MinIO in-cluster est fait pour les sauvegardes de bases de données, pas pour la reprise etcd. Pour l'option 2, utiliser un S3/MinIO **externe** au cluster.
+>
+> Les clés d'accès sont des secrets : les gérer via Sealed Secrets ou un fichier local protégé, jamais en clair dans Git. Pour restaurer après une perte totale : restaurer un snapshot sur un serveur, puis rattacher les autres.
+
+### Validation
+
+1. **Trois serveurs `Ready`** : `kubectl get nodes` montre trois nœuds `control-plane,etcd,master`.
+2. **Tolérance de panne** : éteindre un des trois serveurs. `kubectl` doit continuer de répondre (via la VIP), et les pods du nœud éteint se replanifient sur les deux autres.
+3. **VIP mobile** : vérifier que la VIP répond toujours après l'extinction, portée par un serveur survivant.
+4. **Snapshot etcd** : confirmer qu'un snapshot apparaît dans `/var/lib/rancher/k3s/server/db/snapshots/`, et qu'une copie hors VM existe (backup Proxmox ou S3 externe).
