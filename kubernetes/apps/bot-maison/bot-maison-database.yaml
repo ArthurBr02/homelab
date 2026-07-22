@@ -1,0 +1,26 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: bot-maison-db
+  namespace: default
+spec:
+  instances: 1                      # 1 pour commencer, 2 une fois Longhorn éprouvé (étape 12)
+  bootstrap:
+    initdb:
+      database: veille
+      owner: veille
+  storage:
+    size: 5Gi
+    storageClass: longhorn
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://db-backups/bot-maison-db
+      endpointURL: http://garage.garage.svc:3900   # path-style S3 garanti par l'endpoint explicite
+      s3Credentials:
+        accessKeyId:
+          name: garage-app-creds
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: garage-app-creds
+          key: ACCESS_SECRET_KEY
+    retentionPolicy: "7d"

@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: bot-maison
+  namespace: default
 spec:
   selector:
     matchLabels:
@@ -29,3 +30,16 @@ spec:
             secretKeyRef:
               name: bot-maison-secret
               key: token
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: bot-maison-db-app
+              key: username
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: bot-maison-db-app
+              key: password
+        envFrom:
+        - configMapRef:
+            name: bot-maison-database-config
