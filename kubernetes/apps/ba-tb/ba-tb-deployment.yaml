@@ -28,8 +28,6 @@ spec:
           envFrom:
             - configMapRef:
                 name: ba-tb-config
-            - configMapRef:
-                name: ba-tb-database-config
           env:
             - name: DISCORD_TOKEN
               valueFrom:

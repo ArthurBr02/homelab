@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: bot-maison-database-config
-  namespace: bot-maison
+  name: ba-tb-database-config
+  namespace: ba-tb
 data:
-  POSTGRES_HOST: bot-maison-db-rw
+  POSTGRES_HOST: ba-tb-db-rw
   POSTGRES_PORT: "5432"
   POSTGRES_DB: veille
