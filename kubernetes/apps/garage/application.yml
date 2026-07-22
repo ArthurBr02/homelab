@@ -1,0 +1,23 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: garage
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/arthurbr02/homelab.git
+    targetRevision: main
+    # Manifests bruts (kustomize) hors de kubernetes/apps pour ne pas être
+    # rendus par le root-app (directory.recurse sur kubernetes/apps).
+    path: kubernetes/garage
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: garage
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

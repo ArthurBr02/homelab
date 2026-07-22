@@ -668,8 +668,8 @@ modifier → commit → push
 Le stockage repose sur une **fondation** — un disque persistant (**8.1**) qui porte l'`etcd` et les données — puis trois couches applicatives, à installer **dans cet ordre** car chacune dépend de la précédente :
 
 1. **Longhorn** (**8.2**) — stockage bloc répliqué. Le stockage par défaut de k3s (`local-path`) attache un volume à un seul nœud ; si ce nœud tombe, le volume devient indisponible. Longhorn réplique les données au niveau bloc, pour que le volume suive le pod.
-2. **MinIO** (**8.3**) — stockage objet (dans le cluster, sur un volume Longhorn). Destination des sauvegardes de bases de données.
-3. **CloudNativePG** (**8.4**) — opérateur PostgreSQL : réplication, bascule, archivage WAL et restauration à un instant donné, avec sauvegardes vers MinIO.
+2. **Garage** (**8.3**) — stockage objet (dans le cluster, sur des volumes Longhorn). Destination des sauvegardes de bases de données.
+3. **CloudNativePG** (**8.4**) — opérateur PostgreSQL : réplication, bascule, archivage WAL et restauration à un instant donné, avec sauvegardes vers Garage.
 
 > Tout passe par Argo CD (étape 7). Chaque composant est décrit par une ressource `Application` commitée dans `kubernetes/apps/<composant>/`, que l'app racine déploie automatiquement. On n'installe plus rien avec `helm install` à la main.
 >
@@ -845,49 +845,52 @@ spec:
 >
 > `defaultClassReplicaCount: 1` = une seule copie, épinglée au serveur (workers en *Scheduling Disabled*, voir plus haut). Copie unique assumée : pas de backup externe.
 
-### 8.3 MinIO (stockage objet, dans le cluster)
+### 8.3 Garage (stockage objet, dans le cluster)
 
-Déployé dans le cluster, sur un volume Longhorn. Sert de destination aux sauvegardes de bases de données. L'`etcd`, lui, n'est pas sauvegardé ici : il vit sur le disque persistant du serveur (8.1).
+Déployé dans le cluster, sur des volumes Longhorn. Sert de destination aux sauvegardes de bases de données. L'`etcd`, lui, n'est pas sauvegardé ici : il vit sur le disque persistant du serveur (8.1).
 
-**Identifiants via Sealed Secrets.** Générer le secret racine MinIO scellé (même méthode qu'à l'étape 7) :
+Garage (Deuxfleurs) remplace MinIO : l'édition open-source de MinIO a été vidée de sa console d'admin en 2025 et pousse vers le produit commercial AIStor, sous AGPL. Garage est S3-compatible, léger, pensé pour le self-host, sous licence Apache 2.0.
+
+**Manifests bruts, pas de chart.** Contrairement à MinIO (chart Helm), Garage est décrit en **manifests kustomize**. Contrainte GitOps : le root-app fait `directory.recurse: true` sur `kubernetes/apps`, donc des manifests bruts posés là seraient rendus dans l'app racine (namespace `default`). Les manifests Garage vivent donc dans **`kubernetes/garage/`** (hors du recurse), ciblés par une `Application` placée dans `kubernetes/apps/garage/`.
+
+**Secret racine via Sealed Secrets.** Garage a besoin d'un `rpc_secret` (auth interne du cluster Garage) et d'un `admin_token`. Les générer et sceller (même méthode qu'à l'étape 7) — injectés en variables d'environnement `GARAGE_RPC_SECRET` / `GARAGE_ADMIN_TOKEN`, ils surchargent le `garage.toml`, donc aucun secret n'est en clair dans le ConfigMap :
 
 ```bash
-kubectl create secret generic minio-root \
-  --from-literal=rootUser="admin" \
-  --from-literal=rootPassword="$MINIO_PASSWORD" \
-  --namespace minio --dry-run=client -o yaml \
+RPC=$(openssl rand -hex 32)
+ADMIN=$(openssl rand -base64 32)
+kubectl create secret generic garage-secrets \
+  --namespace garage \
+  --from-literal=GARAGE_RPC_SECRET="$RPC" \
+  --from-literal=GARAGE_ADMIN_TOKEN="$ADMIN" \
+  --dry-run=client -o yaml \
   | kubeseal --format yaml \
-  > kubernetes/apps/minio/minio-root-sealed.yaml
+  > kubernetes/garage/garage-secrets-sealed.yaml
 ```
 
-**Déploiement via Argo CD.** Créer `kubernetes/apps/minio/application.yaml` (chart MinIO, stockage sur Longhorn, credentials tirées du secret scellé) :
+**Manifests kustomize** dans `kubernetes/garage/` :
+
+- `configmap-garage-toml.yaml` — le `garage.toml` (sans secrets) : `replication_factor = 1`, `db_engine = "sqlite"`, `[s3_api]` (`s3_region = "garage"`, port 3900), `[admin]` (port 3903) ;
+- `statefulset.yaml` — image `dxflrs/garage:v2.3.0`, `envFrom` le secret scellé, **2 PVC Longhorn** : `meta` (1Gi) et `data` (20Gi) ;
+- `service.yaml` — ClusterIP nommé `garage`, ports 3900 (S3) et 3903 (admin) → DNS stable `garage.garage.svc:3900` ;
+- `kustomization.yaml` — liste les quatre ressources ci-dessus + le SealedSecret.
+
+**Déploiement via Argo CD.** Créer `kubernetes/apps/garage/application.yml` pointant sur les manifests :
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: minio
+  name: garage
   namespace: argocd
 spec:
   project: default
   source:
-    repoURL: https://charts.min.io/
-    chart: minio
-    targetRevision: 5.4.0           # épingler une version
-    helm:
-      values: |
-        mode: standalone            # une instance pour commencer
-        existingSecret: minio-root
-        persistence:
-          enabled: true
-          storageClass: longhorn
-          size: 20Gi
-        buckets:
-          - name: db-backups
-            policy: none
+    repoURL: https://github.com/arthurbr02/homelab.git
+    targetRevision: main
+    path: kubernetes/garage        # manifests hors de apps/ (recurse du root-app)
   destination:
     server: https://kubernetes.default.svc
-    namespace: minio
+    namespace: garage
   syncPolicy:
     automated:
       prune: true
@@ -896,9 +899,22 @@ spec:
       - CreateNamespace=true
 ```
 
-Commiter d'abord `minio-root-sealed.yaml`, puis `application.yaml`, pour que le secret existe quand le pod démarre.
+Commiter d'abord `garage-secrets-sealed.yaml`, puis le reste, pour que le secret existe quand le pod démarre.
 
-> `mode: standalone` = une seule instance MinIO. Suffisant pour des sauvegardes de homelab. Passer en mode distribué plus tard si le besoin de résilience objet apparaît.
+**Amorçage manuel (non déclaratif).** Après le premier sync, Garage n'est pas encore utilisable : il faut assigner un **layout** (obligatoire même sur un seul nœud), puis créer le **bucket** `db-backups`, une **clé d'accès** et son autorisation. Procédure complète dans `docs/garage-bootstrap.md`. En résumé :
+
+```bash
+kubectl exec -n garage garage-0 -- /garage status         # relève le node_id
+kubectl exec -n garage garage-0 -- /garage layout assign -z dc1 -c 20G <node_id_prefix>
+kubectl exec -n garage garage-0 -- /garage layout apply --version 1
+kubectl exec -n garage garage-0 -- /garage bucket create db-backups
+kubectl exec -n garage garage-0 -- /garage key create backups-key    # affiche Key ID + Secret
+kubectl exec -n garage garage-0 -- /garage bucket allow --read --write db-backups --key backups-key
+```
+
+La clé générée (Key ID + secret) est ensuite scellée dans le namespace de l'app qui sauvegarde (voir 8.4).
+
+> `replication_factor = 1` = une seule copie. Suffisant pour des sauvegardes de homelab. Augmenter (et ajouter des nœuds Garage) plus tard si le besoin de résilience objet apparaît.
 
 ### 8.4 CloudNativePG (PostgreSQL géré)
 
@@ -929,7 +945,7 @@ spec:
       - CreateNamespace=true
 ```
 
-**Définir une base par application.** L'opérateur installé, une base se décrit par une ressource `Cluster`, placée dans le dossier de l'application concernée (une base par app, elles évoluent ensemble). Exemple type, avec sauvegarde vers MinIO :
+**Définir une base par application.** L'opérateur installé, une base se décrit par une ressource `Cluster`, placée dans le dossier de l'application concernée (une base par app, elles évoluent ensemble). Exemple type, avec sauvegarde vers Garage :
 
 ```yaml
 apiVersion: postgresql.cnpg.io/v1
@@ -945,18 +961,18 @@ spec:
   backup:
     barmanObjectStore:
       destinationPath: s3://db-backups/exemple-db
-      endpointURL: http://minio.minio.svc:9000
+      endpointURL: http://garage.garage.svc:3900   # path-style S3 garanti par l'endpoint explicite
       s3Credentials:
         accessKeyId:
-          name: minio-app-creds
+          name: garage-app-creds
           key: ACCESS_KEY_ID
         secretAccessKey:
-          name: minio-app-creds
+          name: garage-app-creds
           key: ACCESS_SECRET_KEY
     retentionPolicy: "30d"
 ```
 
-> Les identifiants d'accès MinIO (`minio-app-creds`) sont un secret : le sceller avec `kubeseal` et le commiter, comme les autres. `instances: 1` au départ ; passer à `2` seulement après avoir validé Longhorn et équipé les nœuds (étape 12).
+> Les identifiants d'accès Garage (`garage-app-creds`) sont un secret : le sceller avec `kubeseal` et le commiter, comme les autres. La clé provient de l'amorçage Garage (8.3, `garage key create`). `instances: 1` au départ ; passer à `2` seulement après avoir validé Longhorn et équipé les nœuds (étape 12).
 
 ### 8.5 Valider
 
@@ -968,7 +984,7 @@ spec:
    1. Créer une base de test avec `instances: 1`.
    2. Y insérer des données.
    3. La détruire.
-   4. La restaurer depuis la sauvegarde MinIO.
+   4. La restaurer depuis la sauvegarde Garage.
 
 > Tant que cette restauration n'a pas fonctionné, ne migre aucune donnée réelle.
 
@@ -1012,7 +1028,7 @@ Respecter cet ordre :
 4. **LXC 117 — reseausocial**
    - Migrer le service le plus volumineux (60 Go).
    - Placer dans son dossier l'application et son objet `Cluster` CloudNativePG : une base par application, afin qu'elles évoluent ensemble.
-   - Utiliser une seule instance dans un premier temps, avec une sauvegarde vers MinIO.
+   - Utiliser une seule instance dans un premier temps, avec une sauvegarde vers Garage.
    - Éteindre le LXC 117.
 
 5. **LXC 107 — Prometheus**
@@ -1053,7 +1069,7 @@ Ils constituent le socle de l'infrastructure. Si le DNS, le reverse proxy ou les
 
 - Passer les bases de données à `instances: 2`, une fois Longhorn opérationnel et les workers équipés de 8 Go de RAM.
 - Effectuer un test réel de bascule : arrêter le nœud qui héberge le primaire PostgreSQL et chronométrer la reprise.
-- Déplacer le fichier d'état Terraform vers un backend distant (S3 ou MinIO).
+- Déplacer le fichier d'état Terraform vers un backend distant (S3 ou Garage).
 - Configurer les sauvegardes Proxmox des trois VMs du cluster.
 
 > Le disque de données persistant (`vm-9900-disk-0`, voir 8.1) est **attaché** à la VM serveur (`scsi1`, `backup=1`) : un backup Proxmox de la VM serveur **le capture donc**. C'est un filet gratuit contre le « SSD mort = perte totale » — à condition que la destination de backup soit sur un **autre support physique** que `media-storage`, sinon la panne du SSD emporterait aussi la sauvegarde.
