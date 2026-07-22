@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: bot-maison
-  namespace: default
+  namespace: bot-maison
 spec:
   selector:
     matchLabels:

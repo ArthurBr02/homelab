@@ -1,0 +1,42 @@
+# Source: https://stackoverflow.com/questions/57167104/how-to-use-local-docker-image-in-kubernetes-via-kubectl
+
+# Création d'un registre local
+# -> docker run -d -p 5000:5000 --restart=always --name registry registry:2
+
+# Build de l'image locale
+# -> docker build . -t localhost:5000/my-image
+
+# Push de l'image locale vers le registre
+# -> docker push localhost:5000/my-image
+
+# Utiliser ghcr.io
+
+# Ecrire dans le repository
+# -> export TOKEN_GHCR=<token>; echo "$TOKEN_GHCR" | docker login ghcr.io -u arthurbr02 --password-stdin
+# -> docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --tag ghcr.io/arthurbr02/<repo>:latest \
+  --push .         
+# -> docker push ghcr.io/arthurbr02/<repo>:latest
+
+# Récupérer depuis le repository
+# Créer un secret
+# -> kubectl create secret docker-registry ghcr-login-secret --docker-server=https://ghcr.io --docker-username=ArthurBr02 --docker-password=<pat> --docker-email=arthurbratigny@gmail.com
+# Ajouter des les deployments
+# -> 
+imagePullSecrets:
+  - name: ghcr-login-secret
+
+# Utilisation dans kubernetes
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+  labels:
+    app: my-app
+spec:
+  containers:
+    - name: app
+      image: localhost:5000/my-image
+      imagePullPolicy: IfNotPresent
