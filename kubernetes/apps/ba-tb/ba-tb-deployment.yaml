@@ -17,7 +17,7 @@ spec:
         - name: ghcr-login-secret
       containers:
         - name: ba-tb
-          image: ghcr.io/arthurbr02/ba-tb:1.0.1
+          image: ghcr.io/arthurbr02/ba-tb:1.0.2
           resources:
             requests:
               cpu: 100m
