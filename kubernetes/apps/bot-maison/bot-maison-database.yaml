@@ -23,4 +23,7 @@ spec:
         secretAccessKey:
           name: garage-app-creds
           key: ACCESS_SECRET_KEY
+        region:
+          name: garage-app-creds
+          key: AWS_REGION
     retentionPolicy: "7d"
