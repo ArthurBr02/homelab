@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ba-tb-config
+  namespace: ba-tb
+data:
+  POSTGRES_HOST: ba-tb-db-rw
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: ba-tb
+  LOG_LEVEL: INFO
+  INACTIVITY_TIMEOUT: "300"
+  ALONE_TIMEOUT: "300"
+  CONNECTION_TIMEOUT: "10"
+  MISTRAL_MODEL: mistral-large-latest
+  MISTRAL_MAX_TOKENS: "10000"
+  MISTRAL_TEMPERATURE: "0.7"
+  COMMAND_PREFIX: "!"

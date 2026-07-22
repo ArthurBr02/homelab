@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ba-tb
+  namespace: ba-tb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ba-tb
+  template:
+    metadata:
+      labels:
+        app: ba-tb
+    spec:
+      imagePullSecrets:
+        - name: ghcr-login-secret
+      containers:
+        - name: ba-tb
+          image: ghcr.io/arthurbr02/ba-tb:1.0.0
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          envFrom:
+            - configMapRef:
+                name: ba-tb-config
+          env:
+            - name: APP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ba-tb-secret
+                  key: APP_TOKEN
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ba-tb-db-app
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ba-tb-db-app
+                  key: password

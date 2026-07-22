@@ -1,0 +1,33 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: ba-tb-db
+  namespace: ba-tb
+spec:
+  # Commencer avec une instance. Plusieurs instances ne remplacent pas les backups.
+  instances: 1
+
+  bootstrap:
+    initdb:
+      database: ba-tb
+      owner: ba-tb
+
+  storage:
+    size: 5Gi
+    storageClass: longhorn
+
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://db-backups/ba-tb-db
+      endpointURL: http://garage.garage.svc:3900
+      s3Credentials:
+        accessKeyId:
+          name: garage-app-creds
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: garage-app-creds
+          key: ACCESS_SECRET_KEY
+        region:
+          name: garage-app-creds
+          key: AWS_REGION
+    retentionPolicy: "7d"

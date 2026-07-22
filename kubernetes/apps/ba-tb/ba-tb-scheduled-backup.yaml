@@ -1,0 +1,12 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: ba-tb-db-daily
+  namespace: ba-tb
+spec:
+  # Format cron à six champs : seconde, minute, heure, jour, mois, semaine.
+  schedule: "0 0 2 * * *"
+  backupOwnerReference: self
+  method: barmanObjectStore
+  cluster:
+    name: ba-tb-db

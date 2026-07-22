@@ -1,0 +1,14 @@
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: ghcr-login-secret
+  namespace: ba-tb
+spec:
+  encryptedData:
+    .dockerconfigjson: AgB50rlhAdhL/F0N0rZXxPpNPahiJ9xrU8c4s63PzoUbSoyOsSdL/P+qVYyj7Ng6vxnKHK28IivFWr5VneAGUGEbtEf6lNPDfRTZ7rJlIPrlU+gLnzjwRDodlZSWsm1yMxhrVEDpRLjludvbbrGLo7VWKumUHcLuIGAkR4WxeFLbIGw634vncZG7UXEhTzaWdINfZguj+/PtzSL41LbFkHKPx0SWO/ltWXysdM5j133tbyacfuoxcvI0o3eCImyHdutKLvhojb0OAt4w9UcuSUQZI2/gf+UIxT0En5NAMYwCwZE069Yq8XSU+7/tTwp4X7436OkumnoRsuCtUCDqfX5ErlJNhhrveM0p45Ars2jqdMsAixp9y3RdI3cIAHaHbi2eIak+8X2rCg2qM1HOiL0NdSf72vU0KD3I36KabvRRjm/01Oh1SaEeWCBTBjI1/SGV+mJxMyreFxCriDVlaOGVJFBv0XKhAPZsJIgHXvJMGU8A5yMBAZnCFDWr2PrdI5WTP7+dRq0g2KfI/2uHPVrR1IcEadqHfZzuVppxoJnRLlYRKNa6QrY6xv3Nxw8emtu3b3k8EcJeBM8Xk/ElkrUyIM8FpfZDsjtW3kk72rDxMHUhLwwmVmyEchlAgRPrGaJxpOK+8kl7S6g/MmWGpptGKpOIn0lwy94GiU4XOO1NqjXkKTA5/xoGRSnwHwZbS7Cyw5tltoqyLswqEMNR9u4LN1nDdtcOinc+lOZ05Dl7TZxWLw3hSST2VP07Myh1n/FntxyngyCOX6ujvsDur9PDr6rvRmOI5elnN+/767pSYEx5MPCn0ZXX8kc5FKBgjuJ9QXHfa4Zj3LKcQAk/nM9BfpVrWtRBWqB2Cz1cwTWDwCE5ryq+ADkcNB354RyPJ1o78n9y3wE8dmZem2Q6pXRt4JPH74p7nhIrf+z6VgYHUbzTAg==
+  template:
+    metadata:
+      name: ghcr-login-secret
+      namespace: ba-tb
+    type: kubernetes.io/dockerconfigjson
