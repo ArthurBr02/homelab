@@ -49,12 +49,12 @@ spec:
                 secretKeyRef:
                   name: ba-tb-secret
                   key: SPOTIFY_CLIENT_SECRET
-            - name: POSTGRES_USER
+            - name: DB_USER
               valueFrom:
                 secretKeyRef:
                   name: ba-tb-db-app
                   key: username
-            - name: POSTGRES_PASSWORD
+            - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: ba-tb-db-app
