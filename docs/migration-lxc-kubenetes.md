@@ -514,118 +514,6 @@ Argo CD lit le dépôt Git et applique tout seul son contenu au cluster. C'est l
 
    À partir de là, Argo CD déploie et surveille tout ce qui se trouve sous `kubernetes/apps/`.
 
-#### Exposer Argo CD sur `argocd.arthurbratigny.fr`
-
-Le chemin réseau retenu est :
-
-```text
-Internet → Nginx Proxy Manager (TLS) → 192.168.1.100:80
-         → Traefik → Service argocd-server:80
-```
-
-Nginx Proxy Manager termine TLS. Argo CD sert donc HTTP à l'intérieur du réseau
-de confiance ; il ne faut jamais publier directement le port 80 de Traefik sur
-Internet.
-
-Créer `kubernetes/apps/argocd-access/config.yaml` :
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: argocd-cm
-  namespace: argocd
-  labels:
-    app.kubernetes.io/name: argocd-cm
-    app.kubernetes.io/part-of: argocd
-data:
-  url: https://argocd.arthurbratigny.fr
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: argocd-cmd-params-cm
-  namespace: argocd
-  labels:
-    app.kubernetes.io/name: argocd-cmd-params-cm
-    app.kubernetes.io/part-of: argocd
-data:
-  server.insecure: "true"
-```
-
-Créer `kubernetes/apps/argocd-access/ingress.yaml` :
-
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: argocd
-  namespace: argocd
-  annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
-spec:
-  ingressClassName: traefik
-  rules:
-    - host: argocd.arthurbratigny.fr
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: argocd-server
-                port:
-                  name: http
-```
-
-Après le premier sync de `server.insecure`, redémarrer une fois le serveur pour
-qu'il relise le paramètre :
-
-```bash
-kubectl rollout restart deployment argocd-server -n argocd
-kubectl rollout status deployment argocd-server -n argocd
-```
-
-Dans le DNS public, créer un enregistrement `argocd.arthurbratigny.fr` pointant
-vers l'adresse publique qui arrive sur Nginx Proxy Manager. Dans Nginx Proxy
-Manager, créer un **Proxy Host** :
-
-- Domain Names : `argocd.arthurbratigny.fr` ;
-- Scheme : `http` ;
-- Forward Hostname/IP : `192.168.1.100` ;
-- Forward Port : `80` ;
-- Websockets Support : activé ;
-- Block Common Exploits : activé ;
-- certificat Let's Encrypt, `Force SSL` et HTTP/2 activés.
-
-Si le routeur ne supporte pas le NAT loopback, ajouter aussi une entrée DNS
-locale qui résout `argocd.arthurbratigny.fr` vers l'adresse LAN de Nginx Proxy
-Manager. Le nom et le certificat restent identiques à l'intérieur et à
-l'extérieur du réseau.
-
-Le proxy doit conserver le header `Host`, ce que Nginx Proxy Manager fait par
-défaut : Traefik s'en sert pour sélectionner l'Ingress.
-
-Valider depuis le réseau local avant d'ouvrir le NAT :
-
-```bash
-curl -I -H 'Host: argocd.arthurbratigny.fr' http://192.168.1.100
-```
-
-Puis ouvrir `https://argocd.arthurbratigny.fr`. Pour le CLI derrière ce reverse
-proxy HTTP, utiliser le mode gRPC-Web :
-
-```bash
-argocd login argocd.arthurbratigny.fr --grpc-web
-argocd app list --grpc-web
-```
-
-> Argo CD est une interface d'administration critique. Préférer un accès par
-> VPN ou une Access List Nginx Proxy Manager. Si elle est accessible depuis
-> Internet, conserver TLS, un mot de passe unique, supprimer le secret admin
-> initial et configurer ensuite un SSO/MFA. Ne pas ajouter de cache CDN devant
-> Argo CD.
-
 ### Installer Sealed Secrets
 
 Un `Secret` Kubernetes classique n'est **pas** chiffré : sa valeur est seulement encodée en base64, donc lisible par quiconque. On ne peut pas le commiter tel quel. Sealed Secrets résout ça : un contrôleur dans le cluster détient une clé privée, et l'outil `kubeseal` chiffre les secrets avec la clé publique correspondante. Le résultat chiffré (`SealedSecret`) peut être poussé dans Git sans risque ; seul le contrôleur peut le déchiffrer.
@@ -1125,7 +1013,199 @@ spec:
 >
 > **Repli si `path_in_datastore` déçoit** : garder le disque **dans** la VM serveur et ne jamais faire `-replace` dessus — le serveur devient un *pet*, la reprise après coupure reste automatique, seul un rebuild OS from-scratch redevient manuel (détacher → recréer → rattacher).
 
-### 8.6 Interfaces d'administration
+## 9. Migrer les services
+
+Respecter cet ordre :
+
+1. **LXC 108 — bots**
+   - Migrer les autres bots Discord, avec un dossier par bot.
+   - Éteindre le LXC 108.
+
+2. **LXC 114 — portfolio**
+   - Créer `deployment.yaml`, `service.yaml` et `ingress.yaml`.
+   - Faire pointer Nginx Proxy Manager (LXC 111) vers le cluster.
+   - Éteindre le LXC 114.
+
+3. **LXC 113 — n8n**
+   - Sauvegarder ses données.
+   - Créer le premier véritable volume persistant sur Longhorn.
+   - Éteindre le LXC 113.
+
+4. **LXC 117 — reseausocial**
+   - Migrer le service le plus volumineux (60 Go).
+   - Placer dans son dossier l'application et son objet `Cluster` CloudNativePG : une base par application, afin qu'elles évoluent ensemble.
+   - Utiliser une seule instance dans un premier temps, avec une sauvegarde vers Garage.
+   - Éteindre le LXC 117.
+
+5. **LXC 107 — Prometheus**
+   - Le migrer en dernier.
+   - Installer `kube-prometheus-stack` plutôt que déplacer l'installation existante.
+   - Éteindre le LXC 107.
+
+## 10. Augmenter la RAM progressivement
+
+Après chaque LXC éteint :
+
+1. Vérifier la mémoire disponible avec `free -h`.
+2. Augmenter la variable de RAM dans le fichier Terraform.
+3. Exécuter `terraform apply`.
+4. Redémarrer la VM concernée.
+5. Créer un commit pour ce palier afin que l'historique montre la croissance du cluster.
+
+**Cible finale :**
+
+- 8 Go par ouvrière ;
+- 4 Go pour la cheffe.
+
+## 11. Services qui ne migrent pas
+
+Les services suivants restent dans des LXC :
+
+| LXC | Service |
+| ---: | --- |
+| 116 | Pi-hole |
+| 111 | Proxy |
+| 102 | VPN |
+| 101 | Ansible |
+| 109 | Service Manager |
+
+Ils constituent le socle de l'infrastructure. Si le DNS, le reverse proxy ou les outils d'administration étaient hébergés dans le cluster, une panne du cluster pourrait supprimer les moyens nécessaires à sa réparation.
+
+## 12. Finaliser
+
+- Passer les bases de données à `instances: 2`, une fois Longhorn opérationnel et les workers équipés de 8 Go de RAM.
+- Effectuer un test réel de bascule : arrêter le nœud qui héberge le primaire PostgreSQL et chronométrer la reprise.
+- Déplacer le fichier d'état Terraform vers un backend distant (S3 ou Garage).
+- Configurer les sauvegardes Proxmox des trois VMs du cluster.
+
+> Le disque de données persistant (`vm-9900-disk-0`, voir 8.1) est **attaché** à la VM serveur (`scsi1`, `backup=1`) : un backup Proxmox de la VM serveur **le capture donc**. C'est un filet gratuit contre le « SSD mort = perte totale » — à condition que la destination de backup soit sur un **autre support physique** que `media-storage`, sinon la panne du SSD emporterait aussi la sauvegarde.
+
+### Vérification finale
+
+Le dépôt Git décrit-il toute l'infrastructure ?
+
+```text
+Machine morte → Terraform recrée la VM → Cloud-Init réinstalle k3s → le nœud rejoint le cluster → Argo CD redéploie le reste
+```
+
+## 13. Ajouter les interfaces d’administration
+
+Cette étape est volontairement placée à la fin : les interfaces ne doivent être
+ajoutées qu’après validation du cluster, du stockage et des sauvegardes.
+
+### 13.1 Exposer Argo CD sur `argocd.arthurbratigny.fr`
+
+Le chemin réseau retenu est :
+
+```text
+Internet → Nginx Proxy Manager (TLS) → 192.168.1.100:80
+         → Traefik → Service argocd-server:80
+```
+
+Nginx Proxy Manager termine TLS. Argo CD sert donc HTTP à l'intérieur du réseau
+de confiance ; il ne faut jamais publier directement le port 80 de Traefik sur
+Internet.
+
+Créer `kubernetes/apps/argocd-access/config.yaml` :
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  url: https://argocd.arthurbratigny.fr
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmd-params-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-cmd-params-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  server.insecure: "true"
+```
+
+Créer `kubernetes/apps/argocd-access/ingress.yaml` :
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argocd
+  namespace: argocd
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: argocd.arthurbratigny.fr
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: argocd-server
+                port:
+                  name: http
+```
+
+Après le premier sync de `server.insecure`, redémarrer une fois le serveur pour
+qu'il relise le paramètre :
+
+```bash
+kubectl rollout restart deployment argocd-server -n argocd
+kubectl rollout status deployment argocd-server -n argocd
+```
+
+Dans le DNS public, créer un enregistrement `argocd.arthurbratigny.fr` pointant
+vers l'adresse publique qui arrive sur Nginx Proxy Manager. Dans Nginx Proxy
+Manager, créer un **Proxy Host** :
+
+- Domain Names : `argocd.arthurbratigny.fr` ;
+- Scheme : `http` ;
+- Forward Hostname/IP : `192.168.1.100` ;
+- Forward Port : `80` ;
+- Websockets Support : activé ;
+- Block Common Exploits : activé ;
+- certificat Let's Encrypt, `Force SSL` et HTTP/2 activés.
+
+Si le routeur ne supporte pas le NAT loopback, ajouter aussi une entrée DNS
+locale qui résout `argocd.arthurbratigny.fr` vers l'adresse LAN de Nginx Proxy
+Manager. Le nom et le certificat restent identiques à l'intérieur et à
+l'extérieur du réseau.
+
+Le proxy doit conserver le header `Host`, ce que Nginx Proxy Manager fait par
+défaut : Traefik s'en sert pour sélectionner l'Ingress.
+
+Valider depuis le réseau local avant d'ouvrir le NAT :
+
+```bash
+curl -I -H 'Host: argocd.arthurbratigny.fr' http://192.168.1.100
+```
+
+Puis ouvrir `https://argocd.arthurbratigny.fr`. Pour le CLI derrière ce reverse
+proxy HTTP, utiliser le mode gRPC-Web :
+
+```bash
+argocd login argocd.arthurbratigny.fr --grpc-web
+argocd app list --grpc-web
+```
+
+> Argo CD est une interface d'administration critique. Préférer un accès par
+> VPN ou une Access List Nginx Proxy Manager. Si elle est accessible depuis
+> Internet, conserver TLS, un mot de passe unique, supprimer le secret admin
+> initial et configurer ensuite un SSO/MFA. Ne pas ajouter de cache CDN devant
+> Argo CD.
+
+### 13.2 Administrer PostgreSQL et Garage
 
 Les interfaces d'administration ne doivent pas être nécessaires au
 fonctionnement des services. Les garder en `ClusterIP` et commencer par un
@@ -1366,78 +1446,3 @@ télécharger et gérer les fichiers des buckets.
 > `GARAGE_ADMIN_TOKEN`. Si un accès permanent est indispensable, créer un
 > Ingress dédié et appliquer le même chemin Traefik → Nginx Proxy Manager que
 > pour Argo CD, avec TLS **et** une Access List/VPN.
-
-## 9. Migrer les services
-
-Respecter cet ordre :
-
-1. **LXC 108 — bots**
-   - Migrer les autres bots Discord, avec un dossier par bot.
-   - Éteindre le LXC 108.
-
-2. **LXC 114 — portfolio**
-   - Créer `deployment.yaml`, `service.yaml` et `ingress.yaml`.
-   - Faire pointer Nginx Proxy Manager (LXC 111) vers le cluster.
-   - Éteindre le LXC 114.
-
-3. **LXC 113 — n8n**
-   - Sauvegarder ses données.
-   - Créer le premier véritable volume persistant sur Longhorn.
-   - Éteindre le LXC 113.
-
-4. **LXC 117 — reseausocial**
-   - Migrer le service le plus volumineux (60 Go).
-   - Placer dans son dossier l'application et son objet `Cluster` CloudNativePG : une base par application, afin qu'elles évoluent ensemble.
-   - Utiliser une seule instance dans un premier temps, avec une sauvegarde vers Garage.
-   - Éteindre le LXC 117.
-
-5. **LXC 107 — Prometheus**
-   - Le migrer en dernier.
-   - Installer `kube-prometheus-stack` plutôt que déplacer l'installation existante.
-   - Éteindre le LXC 107.
-
-## 10. Augmenter la RAM progressivement
-
-Après chaque LXC éteint :
-
-1. Vérifier la mémoire disponible avec `free -h`.
-2. Augmenter la variable de RAM dans le fichier Terraform.
-3. Exécuter `terraform apply`.
-4. Redémarrer la VM concernée.
-5. Créer un commit pour ce palier afin que l'historique montre la croissance du cluster.
-
-**Cible finale :**
-
-- 8 Go par ouvrière ;
-- 4 Go pour la cheffe.
-
-## 11. Services qui ne migrent pas
-
-Les services suivants restent dans des LXC :
-
-| LXC | Service |
-| ---: | --- |
-| 116 | Pi-hole |
-| 111 | Proxy |
-| 102 | VPN |
-| 101 | Ansible |
-| 109 | Service Manager |
-
-Ils constituent le socle de l'infrastructure. Si le DNS, le reverse proxy ou les outils d'administration étaient hébergés dans le cluster, une panne du cluster pourrait supprimer les moyens nécessaires à sa réparation.
-
-## 12. Finaliser
-
-- Passer les bases de données à `instances: 2`, une fois Longhorn opérationnel et les workers équipés de 8 Go de RAM.
-- Effectuer un test réel de bascule : arrêter le nœud qui héberge le primaire PostgreSQL et chronométrer la reprise.
-- Déplacer le fichier d'état Terraform vers un backend distant (S3 ou Garage).
-- Configurer les sauvegardes Proxmox des trois VMs du cluster.
-
-> Le disque de données persistant (`vm-9900-disk-0`, voir 8.1) est **attaché** à la VM serveur (`scsi1`, `backup=1`) : un backup Proxmox de la VM serveur **le capture donc**. C'est un filet gratuit contre le « SSD mort = perte totale » — à condition que la destination de backup soit sur un **autre support physique** que `media-storage`, sinon la panne du SSD emporterait aussi la sauvegarde.
-
-### Vérification finale
-
-Le dépôt Git décrit-il toute l'infrastructure ?
-
-```text
-Machine morte → Terraform recrée la VM → Cloud-Init réinstalle k3s → le nœud rejoint le cluster → Argo CD redéploie le reste
-```
