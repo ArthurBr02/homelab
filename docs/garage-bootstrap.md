@@ -51,6 +51,7 @@ kubectl create secret generic garage-app-creds \
   --namespace <ns-de-l-app> \
   --from-literal=ACCESS_KEY_ID=<keyID> \
   --from-literal=ACCESS_SECRET_KEY=<secret> \
+  --from-literal=AWS_REGION=garage \
   --dry-run=client -o yaml \
   | kubeseal --format yaml \
   > kubernetes/apps/<app>/garage-app-creds-sealed.yaml
@@ -70,7 +71,14 @@ backup:
       secretAccessKey:
         name: garage-app-creds
         key: ACCESS_SECRET_KEY
+      region:
+        name: garage-app-creds
+        key: AWS_REGION
 ```
+
+La région doit correspondre à `s3_region = "garage"` dans la configuration de
+Garage. Sans ce champ, les clients AWS utilisent souvent `us-east-1` et Garage
+refuse la signature avec `400 Bad Request`.
 
 ## Régénérer le secret racine (rpc/admin)
 
