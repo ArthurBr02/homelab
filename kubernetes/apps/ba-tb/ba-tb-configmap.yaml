@@ -6,7 +6,7 @@ metadata:
 data:
   DB_HOST: ba-tb-db-rw
   DB_PORT: "5432"
-  DB_DB: ba-tb
+  DB_NAME: ba-tb
   LOG_LEVEL: INFO
   INACTIVITY_TIMEOUT: "300"
   ALONE_TIMEOUT: "300"
