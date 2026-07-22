@@ -29,11 +29,26 @@ spec:
             - configMapRef:
                 name: ba-tb-config
           env:
-            - name: APP_TOKEN
+            - name: DISCORD_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: ba-tb-secret
-                  key: APP_TOKEN
+                  key: DISCORD_TOKEN
+            - name: MISTRAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ba-tb-secret
+                  key: MISTRAL_API_KEY
+            - name: SPOTIFY_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: ba-tb-secret
+                  key: SPOTIFY_CLIENT_ID
+            - name: SPOTIFY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ba-tb-secret
+                  key: SPOTIFY_CLIENT_SECRET
             - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
