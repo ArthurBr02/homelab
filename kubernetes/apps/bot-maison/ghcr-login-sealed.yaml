@@ -1,0 +1,13 @@
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: ghcr-login-secret
+  namespace: bot-maison
+spec:
+  encryptedData:
+    .dockerconfigjson: AgBBRhCZnrD+N6yiQcjDLbaKJpXQZ83ZBQgTYPKf2JvxdrV4FWcYl775v0uXCz/7m/FtGWNhLpA/J5cjla9BXS3vjtzP5wqrGFeHecIiCD6iRTeybBJUfswa4DwnesAfUWtmP5yYhA83IXixrVmFK4mFYlV92VvFwq6m9BTxoa+aZomU5fu+B9LOMIV0BYqW0J2dscPZv5JIhxU6dBMft2h+v1+H7cWUww6alCz/jR88/Qcm9coyDbSOWD+tC8iPFSNGzrnpD/qWbs1jrz4H07lFFPAZFKlw4zYR9IVn0WQuuerEMTmB2B6P+gpzhth2mUivd19mXuXZMRmnV7XvMQasxUZC6qBT0zPgtjtsaGu31R8xOVPHvJDqBiU/079D2rYNF1xsoUl6Fqn35wc7YE054Fc+Xb+sLP3qRDPXOY6SxnXOdSqpgDd0C61Ts8k3ZNRa3Yty72IJjwQ9GxMSIpoMMxRRsJ6ahHvTkY1N3kQ1MK+NvuGxJK+9DouUgmGWqK7gOG+WkSwx0ixjLNdbWpqo+/CNUGakrzusvWjfW7SjvFpx9q3hOh5wwqf/dkflAzD2P5DmA0g+UVToaJkaFwZLrPGbKTbApkz12XQ44Fbmmcmepe0s9RdpH7UsEXZJyTq2TtMBi8cI71DDr8gE4awPlvrvjV52mM+cONME8B81MBXTlWALnb6gh+ixMlHp21jtFro+dnpwLm4aek39pEHWXaSDVuviBUTXTzVTEVZLU/IBDvLFVqBh/0ZQ8d3h5Djbd5P5eGfmGObs3GVH9aHz1Jv6RXbq/wOu1B6sZooWGzUw4jAU8MS5UNpiBlJrKO2veTIa9Bfug7R1iD7SQcoCmqm4KxfVER+2GC7UGW5E6IiDddoLxSWDgwwSZXx2U9ujM/K9HUnWgtVvUsVFnXtMcJbA3D7ZJODABsZMy+8LMrUyKgzv1x2FzdjymlcPBwvYnRIhspu6X3mWYrC+IIO1G9ik4OHtxBHjnniFYvY=
+  template:
+    metadata:
+      name: ghcr-login-secret
+      namespace: bot-maison
+    type: kubernetes.io/dockerconfigjson
