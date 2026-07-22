@@ -11,6 +11,11 @@ spec:
     targetRevision: 1.11.3        # épingler une version
     helm:
       values: |
+        # The Helm pre-upgrade hook depends on resources that Argo CD has not
+        # created yet during the initial sync. Longhorn recommends disabling
+        # this Job when the chart is managed by Argo CD/GitOps.
+        preUpgradeChecker:
+          jobEnabled: false
         persistence:
           defaultClass: true       # Longhorn devient la StorageClass par défaut
           defaultClassReplicaCount: 1   # copie unique, sur le serveur (voir 8.2)
