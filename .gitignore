@@ -10,3 +10,4 @@ crash.log
 .env
 auth-ghcr-io.sh
 sealed-secrets-key-backup.yaml
+tmp/
