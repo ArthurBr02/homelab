@@ -72,7 +72,7 @@ Répartir les responsabilités ainsi :
 - **Terraform** crée les VMs et leur attache le `user-data` Cloud-Init ;
 - **Cloud-Init** configure le système, installe k3s et rattache le nœud au cluster ;
 - **Argo CD** installe ensuite Longhorn, Prometheus et les applications Kubernetes ;
-- un **disque persistant** (hors de la VM serveur) conserve l'`etcd` et les données à travers une recréation de VM (étape 13).
+- un **disque persistant** (hors de la VM serveur) conserve l'`etcd` et les données à travers une recréation de VM (voir 8.1).
 
 ### Répartition des modifications par fichier
 
@@ -336,9 +336,9 @@ Si les VMs ont déjà démarré avant l'ajout de ces paramètres, Cloud-Init peu
 
 Avec un seul serveur et deux agents, Cloud-Init réinstalle automatiquement k3s si la VM est recréée, mais l'`etcd` — donc tout l'état Kubernetes — disparaît avec le disque du serveur. Les agents n'en gardent aucune copie.
 
-Le choix de ce homelab (détaillé à l'étape 13) : **rester à 1 serveur + 2 agents**, mais placer l'`etcd` et les données Longhorn sur un **disque persistant possédé hors de la VM serveur**. La VM redevient jetable ; le disque, lui, survit à sa recréation, et k3s reprend l'état existant au redémarrage.
+Le choix de ce homelab (détaillé en 8.1) : **rester à 1 serveur + 2 agents**, mais placer l'`etcd` et les données Longhorn sur un **disque persistant possédé hors de la VM serveur**. La VM redevient jetable ; le disque, lui, survit à sa recréation, et k3s reprend l'état existant au redémarrage.
 
-> Alternative non retenue : trois nœuds `server` avec etcd embarqué + kube-vip, qui tolèrent la perte d'une VM sans aucune intervention. Plus robuste, mais plus lourd — écarté ici au profit de la simplicité (voir la discussion à l'étape 13).
+> Alternative non retenue : trois nœuds `server` avec etcd embarqué + kube-vip, qui tolèrent la perte d'une VM sans aucune intervention. Plus robuste, mais plus lourd — écarté ici au profit de la simplicité (voir la discussion en 8.1).
 
 ## 5. Monter et valider le cluster
 
@@ -611,7 +611,7 @@ Après ça, Argo CD tire toutes les applications depuis Git et le contrôleur d�
 
 Argo CD et Sealed Secrets réparent la partie « configuration et secrets », mais **pas l'`etcd` ni les données** : ni l'un ni l'autre ne sont dans Git. Reconstruire la VM serveur détruit son disque, donc l'état Kubernetes et les volumes.
 
-La réponse retenue (détaillée à l'étape 13) : sortir l'`etcd` et les données Longhorn de la VM, sur un **disque persistant possédé hors de son cycle de vie**. Un `tofu apply -replace` du serveur recrée la VM mais **réattache le même disque**, et k3s **reprend l'`etcd` existant** — sans bootstrap, sans perte.
+La réponse retenue (détaillée en 8.1) : sortir l'`etcd` et les données Longhorn de la VM, sur un **disque persistant possédé hors de son cycle de vie**. Un `tofu apply -replace` du serveur recrée la VM mais **réattache le même disque**, et k3s **reprend l'`etcd` existant** — sans bootstrap, sans perte.
 
 Deux chaînes de récupération, selon ce qui est perdu :
 
@@ -642,17 +642,116 @@ modifier → commit → push
 
 ## 8. Préparer le stockage des données
 
-Trois couches, à installer **dans cet ordre** car chacune dépend de la précédente :
+Le stockage repose sur une **fondation** — un disque persistant (**8.1**) qui porte l'`etcd` et les données — puis trois couches applicatives, à installer **dans cet ordre** car chacune dépend de la précédente :
 
-1. **Longhorn** — stockage bloc répliqué. Le stockage par défaut de k3s (`local-path`) attache un volume à un seul nœud ; si ce nœud tombe, le volume devient indisponible. Longhorn réplique les données au niveau bloc, pour que le volume suive le pod.
-2. **MinIO** — stockage objet (dans le cluster, sur un volume Longhorn). Destination des sauvegardes de bases de données.
-3. **CloudNativePG** — opérateur PostgreSQL : réplication, bascule, archivage WAL et restauration à un instant donné, avec sauvegardes vers MinIO.
+1. **Longhorn** (**8.2**) — stockage bloc répliqué. Le stockage par défaut de k3s (`local-path`) attache un volume à un seul nœud ; si ce nœud tombe, le volume devient indisponible. Longhorn réplique les données au niveau bloc, pour que le volume suive le pod.
+2. **MinIO** (**8.3**) — stockage objet (dans le cluster, sur un volume Longhorn). Destination des sauvegardes de bases de données.
+3. **CloudNativePG** (**8.4**) — opérateur PostgreSQL : réplication, bascule, archivage WAL et restauration à un instant donné, avec sauvegardes vers MinIO.
 
 > Tout passe par Argo CD (étape 7). Chaque composant est décrit par une ressource `Application` commitée dans `kubernetes/apps/<composant>/`, que l'app racine déploie automatiquement. On n'installe plus rien avec `helm install` à la main.
 >
 > Une ressource `Application` vit dans le namespace `argocd` : ses manifestes doivent donc porter `metadata.namespace: argocd` explicitement, sinon l'app racine les enverrait dans `default`.
 
-### 8.1 Longhorn (stockage bloc répliqué)
+### 8.1 Le disque persistant du serveur (fondation)
+
+Longhorn **et** l'`etcd` doivent survivre à une recréation de la VM serveur. La fondation commune est un **disque séparé, possédé hors de la VM**, que Terraform ne supprime pas quand il recrée cette VM. La VM devient jetable (*cattle*), le disque de données devient un *pet*.
+
+Distinction clé, souvent source de confusion :
+
+- Le **datastore** `media-storage` (le SSD `sdb`, monté `/media/storage` sur l'hôte Proxmox) persiste toujours.
+- Mais le **disque d'une VM** n'est qu'un fichier *dans* ce datastore (`media-storage:vm-9001-disk-0`). Quand Terraform **détruit** la VM, Proxmox **supprime ce fichier**.
+
+D'où deux cas :
+
+- **Coupure de courant / reboot** : la VM n'est pas détruite → son disque reste → k3s redémarre et l'etcd reprend. **Déjà couvert, rien à construire.**
+- **`tofu apply -replace`** : la VM est détruite → son fichier-disque est supprimé → perte. C'est le cas que ce disque persistant traite.
+
+```text
+media-storage (sdb, persiste toujours)
+├── vm-9001-disk-0   OS serveur    → jetable (supprimé au -replace)
+├── vm-9900-disk-0   data k3s      → persistant (jamais supprimé)
+│     monté /mnt/k3s-data :
+│       rancher/k3s  → etcd, certs, token, clé Sealed Secrets
+│       longhorn     → volumes PVC (réplica-1)
+├── vm-9002-disk-0   OS worker-1   → jetable
+└── vm-9003-disk-0   OS worker-2   → jetable
+```
+
+> Choix assumés : **copie unique** (pas de redondance ni de backup externe) et **pas de HA** (le serveur reste le point unique du control plane). En échange : simplicité maximale et zéro perte sur les deux cas ci-dessus. La validation `-replace` est en 8.5. Pas de kube-vip : un seul serveur, son IP statique (`192.168.1.100`) reste l'endpoint stable de l'API ; les agents se reconnectent seuls après un rebuild.
+
+**Provisionner le volume (une fois, hors Terraform).** Sur l'hôte Proxmox, allouer un volume avec un **VMID fantôme** qu'aucune VM n'utilise (ni le template `9000`, ni les VMs `9001`–`9003`) :
+
+```bash
+# sur l'hôte Proxmox
+pvesm alloc media-storage 9900 vm-9900-disk-0 100G --format raw
+```
+
+Le volume `media-storage:vm-9900-disk-0` n'appartient à aucune VM active : Terraform ne le détruira jamais.
+
+**Attacher le disque à la VM serveur (Terraform).** Deux changements dans `terraform/cloned-vm.tf`, **uniquement pour le serveur** :
+
+1. Empêcher Terraform de supprimer les disques qu'il ne gère pas, sur la ressource `proxmox_virtual_environment_vm.k3s` :
+
+   ```hcl
+   delete_unreferenced_disks_on_destroy = false
+   ```
+
+2. Attacher le volume existant par son chemin, au lieu d'en créer un neuf. La `for_each` itère sur les trois VMs ; on n'ajoute ce disque qu'au `control_plane` :
+
+   ```hcl
+   dynamic "disk" {
+     for_each = each.key == "control_plane" ? [1] : []
+     content {
+       datastore_id      = var.proxmox_datastore_id
+       path_in_datastore = "vm-9900-disk-0"   # volume possédé hors VM
+       interface         = "scsi1"
+     }
+   }
+   ```
+
+> `path_in_datastore` référence un volume **déjà existant** : Terraform l'attache sans le recréer ni le formater. Combiné à `delete_unreferenced_disks_on_destroy = false`, un `tofu apply -replace` du serveur détruit la VM mais **laisse le volume intact**, puis le rattache à la nouvelle VM.
+>
+> ⚠️ `path_in_datastore` est marqué **expérimental** par `bpg/proxmox` (la demande d'un `prevent_from_destruction` natif a été refusée, « not planned »). Épingler la version du provider dans `terraform/versions.tf`, et **tester** (8.5) avant d'y confier des données.
+
+**Monter le disque et y placer l'etcd (Cloud-Init).** Dans `terraform/cloud-init/k3s.yaml.tftpl`, uniquement sur le serveur, préparer et monter le disque **de façon idempotente** : il ne faut surtout pas reformater un disque qui contient déjà l'etcd au moment d'un rebuild.
+
+```yaml
+%{ if install_exec == "server" ~}
+disk_setup:
+  /dev/sdb:
+    table_type: gpt
+    layout: true
+    overwrite: false        # ne repartitionne pas un disque déjà initialisé
+fs_setup:
+  - device: /dev/sdb1
+    filesystem: ext4
+    overwrite: false        # ne reformate pas si un ext4 existe déjà
+mounts:
+  - [/dev/sdb1, /mnt/k3s-data, ext4, "defaults,nofail", "0", "2"]
+%{ endif ~}
+```
+
+Puis pointer le data-dir de k3s sur ce disque, dans le `config.yaml` généré :
+
+```yaml
+write_files:
+  - path: /etc/rancher/k3s/config.yaml
+    permissions: "0600"
+    content: |
+      token: ${jsonencode(k3s_token)}
+      data-dir: /mnt/k3s-data/rancher/k3s
+      ${indent(6, k3s_config)}
+```
+
+> Comportement selon l'état du disque :
+> - **Premier boot** (disque vierge) : `fs_setup` formate, k3s `cluster-init: true` crée un etcd neuf.
+> - **Rebuild** (disque déjà rempli) : `overwrite: false` ne touche à rien, k3s trouve l'etcd existant sur `/mnt/k3s-data` et **le reprend**. `cluster-init: true` est ignoré sur un etcd existant.
+>
+> Vérifier le nom réel du disque (`/dev/sdb` vs `/dev/vdb`) avec `lsblk` : `scsi1` donne `sd*`, un contrôleur `virtio` donnerait `vd*`.
+>
+> Ordonnancement : sur une construction **neuve**, intégrer ces changements Cloud-Init dès l'étape 4 (à la création des VMs). Sur le cluster **existant**, les appliquer ici en recréant la VM serveur (le bot n'a pas encore de données critiques).
+
+### 8.2 Longhorn (stockage bloc répliqué)
 
 **Prérequis système, dans Cloud-Init.** Longhorn a besoin de `open-iscsi` et `nfs-common` sur chaque nœud. Les ajouter au bloc `packages` de `terraform/cloud-init/k3s.yaml.tftpl` :
 
@@ -663,9 +762,7 @@ packages:
   - nfs-common
 ```
 
-**Disque pour Longhorn = le disque persistant du serveur.** Dans cette architecture (1 serveur + 2 agents, voir étape 13), les données Longhorn ne vivent **que sur le serveur**, sur le même disque persistant que l'`etcd`. On ne crée donc pas un disque Longhorn séparé sur chaque nœud : c'est le disque de l'étape 13, monté sur `/mnt/k3s-data`, dont le sous-dossier `longhorn/` sert de `defaultDataPath`.
-
-> Ce disque est **possédé hors de la VM serveur** pour survivre à un `tofu apply -replace` — voir 13.1/13.2 pour sa création et son attache, 13.3 pour son montage idempotent. Les workers n'ont pas de disque persistant : on y désactive le scheduling Longhorn (13.4).
+**Données Longhorn sur le disque du serveur.** Longhorn stocke ses volumes dans le sous-dossier `longhorn/` du disque persistant de 8.1 (`defaultDataPath: /mnt/k3s-data/longhorn`), en **une seule copie sur le serveur**. Les deux workers n'ont pas de disque persistant : on y **désactive le scheduling Longhorn** (UI Longhorn → réglages de nœud → *Scheduling Disabled* sur les disques des workers), pour que l'unique réplica atterrisse sur le serveur. Un pod qui tourne sur un worker accède quand même au volume, servi par le réseau depuis le serveur.
 
 **Déploiement via Argo CD.** Créer `kubernetes/apps/longhorn/application.yaml` :
 
@@ -685,7 +782,7 @@ spec:
       values: |
         persistence:
           defaultClass: true       # Longhorn devient la StorageClass par défaut
-          defaultClassReplicaCount: 1   # copie unique, sur le serveur (voir 13.4)
+          defaultClassReplicaCount: 1   # copie unique, sur le serveur (voir 8.2)
         defaultSettings:
           defaultDataPath: /mnt/k3s-data/longhorn
   destination:
@@ -706,11 +803,11 @@ spec:
 >   -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}'
 > ```
 >
-> `defaultClassReplicaCount: 1` = une seule copie, épinglée au serveur (workers en *Scheduling Disabled*, voir 13.4). Copie unique assumée : pas de backup externe.
+> `defaultClassReplicaCount: 1` = une seule copie, épinglée au serveur (workers en *Scheduling Disabled*, voir plus haut). Copie unique assumée : pas de backup externe.
 
-### 8.2 MinIO (stockage objet, dans le cluster)
+### 8.3 MinIO (stockage objet, dans le cluster)
 
-Déployé dans le cluster, sur un volume Longhorn. Sert de destination aux sauvegardes de bases de données. L'`etcd`, lui, n'est pas sauvegardé ici : il vit sur le disque persistant du serveur (étape 13).
+Déployé dans le cluster, sur un volume Longhorn. Sert de destination aux sauvegardes de bases de données. L'`etcd`, lui, n'est pas sauvegardé ici : il vit sur le disque persistant du serveur (8.1).
 
 **Identifiants via Sealed Secrets.** Générer le secret racine MinIO scellé (même méthode qu'à l'étape 7) :
 
@@ -763,7 +860,7 @@ Commiter d'abord `minio-root-sealed.yaml`, puis `application.yaml`, pour que le 
 
 > `mode: standalone` = une seule instance MinIO. Suffisant pour des sauvegardes de homelab. Passer en mode distribué plus tard si le besoin de résilience objet apparaît.
 
-### 8.3 CloudNativePG (PostgreSQL géré)
+### 8.4 CloudNativePG (PostgreSQL géré)
 
 Un **opérateur** qui gère PostgreSQL à ta place : réplication, bascule automatique, archivage WAL, restauration à un instant donné. On ne crée jamais un `StatefulSet` PostgreSQL soi-même.
 
@@ -821,17 +918,34 @@ spec:
 
 > Les identifiants d'accès MinIO (`minio-app-creds`) sont un secret : le sceller avec `kubeseal` et le commiter, comme les autres. `instances: 1` au départ ; passer à `2` seulement après avoir validé Longhorn et équipé les nœuds (étape 12).
 
-### Validation
+### 8.5 Valider
+
+**Stockage :**
 
 1. **StorageClass par défaut** : `kubectl get storageclass` montre `longhorn (default)` et `local-path` sans le tag `(default)`.
-2. **Volume répliqué** : créer un PVC de test, écrire un fichier, supprimer le pod, le recréer sur un autre nœud, et vérifier que le fichier est toujours là.
-3. **Cycle de sauvegarde/restauration PostgreSQL** :
+2. **Volume répliqué** : créer un PVC de test, écrire un fichier, supprimer le pod, le recréer sur un autre nœud, vérifier que le fichier est toujours là.
+3. **Cycle sauvegarde/restauration PostgreSQL** :
    1. Créer une base de test avec `instances: 1`.
    2. Y insérer des données.
    3. La détruire.
    4. La restaurer depuis la sauvegarde MinIO.
 
-> Tant que cette restauration n'a pas fonctionné, ne migrer aucune donnée réelle.
+> Tant que cette restauration n'a pas fonctionné, ne migre aucune donnée réelle.
+
+**Survie du disque persistant** — `path_in_datastore` étant expérimental, à prouver avant toute donnée réelle :
+
+1. Poser deux témoins : `kubectl create configmap survivor --from-literal=proof=avant-replace`, plus un PVC Longhorn contenant un fichier connu.
+2. Recréer la VM serveur : `tofu apply -replace='proxmox_virtual_environment_vm.k3s["control_plane"]'`.
+3. Après redémarrage, vérifier que **rien n'a été perdu** :
+   - `vm-9900-disk-0` existe toujours (Proxmox → media-storage) ;
+   - le témoin etcd : `kubectl get configmap survivor -o jsonpath='{.data.proof}'` ;
+   - Argo CD + Sealed Secrets présents, secrets déchiffrés ;
+   - le fichier du PVC Longhorn intact ;
+   - les deux agents reconnectés : `kubectl get nodes` → 3 `Ready`.
+
+> **Cas particulier — perte du disque de données** (SSD mort ou volume supprimé) : le cluster repart à vide. Rejouer `kubernetes/bootstrap.sh` (étape 7), puis **re-sceller** les secrets — la clé Sealed Secrets vivait dans l'etcd sur le disque perdu (copie unique assumée). Tant que le disque survit, un `-replace` reprend seul, sans bootstrap.
+>
+> **Repli si `path_in_datastore` déçoit** : garder le disque **dans** la VM serveur et ne jamais faire `-replace` dessus — le serveur devient un *pet*, la reprise après coupure reste automatique, seul un rebuild OS from-scratch redevient manuel (détacher → recréer → rattacher).
 
 ## 9. Migrer les services
 
@@ -898,7 +1012,7 @@ Ils constituent le socle de l'infrastructure. Si le DNS, le reverse proxy ou les
 - Déplacer le fichier d'état Terraform vers un backend distant (S3 ou MinIO).
 - Configurer les sauvegardes Proxmox des trois VMs du cluster.
 
-> Le disque de données persistant (`vm-9900-disk-0`, étape 13) n'appartient à aucune VM : un backup Proxmox de la VM serveur **ne le capture pas**. C'est cohérent avec la copie unique assumée. Pour le protéger malgré tout, l'ajouter comme cible de backup dédiée ou le copier à froid — seul moyen de lever le risque « SSD mort = perte totale ».
+> Le disque de données persistant (`vm-9900-disk-0`, voir 8.1) n'appartient à aucune VM : un backup Proxmox de la VM serveur **ne le capture pas**. C'est cohérent avec la copie unique assumée. Pour le protéger malgré tout, l'ajouter comme cible de backup dédiée ou le copier à froid — seul moyen de lever le risque « SSD mort = perte totale ».
 
 ### Vérification finale
 
@@ -908,175 +1022,3 @@ Le dépôt Git décrit-il toute l'infrastructure ?
 Machine morte → Terraform recrée la VM → Cloud-Init réinstalle k3s → le nœud rejoint le cluster → Argo CD redéploie le reste
 ```
 
-## 13. Serveur unique auto-reconstructible (disque persistant)
-
-Objectif : garder l'architecture **1 serveur + 2 agents**, mais rendre le serveur reconstructible **sans perte**. Après une **coupure de courant** ou un **`tofu apply -replace`** de la VM serveur, le cluster revient à l'identique — etcd, clé Sealed Secrets, données Longhorn — **sans backup externe**, la logique portée par Cloud-Init.
-
-> Choix assumés : **copie unique** des données (pas de redondance inter-nœuds ni de backup externe) et **pas de HA** (le serveur reste le point unique du control plane). En échange : simplicité maximale et zéro perte sur les deux cas visés.
-
-### Le principe : VM jetable, disque persistant
-
-Distinction clé, souvent source de confusion :
-
-- Le **datastore** `media-storage` (le SSD `sdb`, monté `/media/storage` sur l'hôte Proxmox) persiste toujours.
-- Mais le **disque d'une VM** n'est qu'un fichier *dans* ce datastore (`media-storage:vm-9001-disk-0`). Quand Terraform **détruit** la VM, Proxmox **supprime ce fichier**.
-
-D'où les deux cas :
-
-- **Coupure de courant / reboot** : la VM n'est pas détruite → son disque reste → k3s redémarre et l'etcd reprend. **Déjà couvert aujourd'hui, rien à construire.**
-- **`tofu apply -replace`** : la VM est détruite → son fichier-disque est supprimé → perte. C'est le seul cas à traiter.
-
-La solution : mettre l'état k3s (etcd) et les données Longhorn sur un **disque séparé, possédé hors de la VM serveur**, que Terraform ne supprime pas quand il recrée la VM. La VM devient jetable (*cattle*), le disque de données devient un *pet*.
-
-```text
-media-storage (sdb, persiste toujours)
-├── vm-9001-disk-0   OS serveur    → jetable (supprimé au -replace)
-├── vm-9900-disk-0   data k3s      → persistant (jamais supprimé)
-│     monté /mnt/k3s-data :
-│       rancher/k3s  → etcd, certs, token, clé Sealed Secrets
-│       longhorn     → volumes PVC (réplica-1)
-├── vm-9002-disk-0   OS worker-1   → jetable
-└── vm-9003-disk-0   OS worker-2   → jetable
-```
-
-Pas de kube-vip : un seul serveur, son IP statique (`192.168.1.100`) reste l'endpoint stable de l'API. Les agents (IP et token inchangés) se reconnectent seuls après un rebuild.
-
-### 13.1 Provisionner le disque de données (une fois, hors Terraform)
-
-Le disque doit être **possédé hors du cycle de vie de la VM** pour survivre à sa destruction. On l'alloue à la main sur l'hôte Proxmox, avec un **VMID fantôme** qu'aucune VM n'utilise (ni le template `9000`, ni les VMs `9001`–`9003`) :
-
-```bash
-# sur l'hôte Proxmox
-pvesm alloc media-storage 9900 vm-9900-disk-0 100G --format raw
-```
-
-Le volume `media-storage:vm-9900-disk-0` n'appartient à aucune VM active : Terraform ne le détruira jamais, même en recréant le serveur.
-
-### 13.2 Attacher le disque à la VM serveur (Terraform)
-
-Deux changements dans `terraform/cloned-vm.tf`, **uniquement pour le serveur** :
-
-1. Empêcher Terraform de supprimer les disques qu'il ne gère pas, au niveau de la ressource `proxmox_virtual_environment_vm.k3s` :
-
-   ```hcl
-   delete_unreferenced_disks_on_destroy = false
-   ```
-
-2. Attacher le volume existant par son chemin, au lieu d'en créer un neuf. La `for_each` de la ressource itère sur les trois VMs ; on n'ajoute ce disque qu'au `control_plane` avec un bloc `dynamic` :
-
-   ```hcl
-   dynamic "disk" {
-     for_each = each.key == "control_plane" ? [1] : []
-     content {
-       datastore_id      = var.proxmox_datastore_id
-       path_in_datastore = "vm-9900-disk-0"   # volume possédé hors VM
-       interface         = "scsi1"
-     }
-   }
-   ```
-
-> `path_in_datastore` référence un volume **déjà existant** : Terraform l'attache sans le recréer ni le formater. Combiné à `delete_unreferenced_disks_on_destroy = false`, un `tofu apply -replace` du serveur détruit la VM mais **laisse le volume intact**, puis le rattache à la nouvelle VM.
->
-> ⚠️ `path_in_datastore` est marqué **expérimental** par `bpg/proxmox` (la demande d'un `prevent_from_destruction` natif a été refusée, « not planned »). Épingler la version du provider dans `terraform/versions.tf`, et **tester** (13.5) avant d'y confier des données.
-
-### 13.3 Faire vivre etcd et Longhorn sur ce disque (Cloud-Init)
-
-Dans `terraform/cloud-init/k3s.yaml.tftpl`, uniquement sur le serveur, préparer et monter le disque **de façon idempotente** : il ne faut surtout pas reformater un disque qui contient déjà l'etcd au moment d'un rebuild.
-
-```yaml
-%{ if install_exec == "server" ~}
-disk_setup:
-  /dev/sdb:
-    table_type: gpt
-    layout: true
-    overwrite: false        # ne repartitionne pas un disque déjà initialisé
-fs_setup:
-  - device: /dev/sdb1
-    filesystem: ext4
-    overwrite: false        # ne reformate pas si un ext4 existe déjà
-mounts:
-  - [/dev/sdb1, /mnt/k3s-data, ext4, "defaults,nofail", "0", "2"]
-%{ endif ~}
-```
-
-Puis pointer le data-dir de k3s sur ce disque, dans le `config.yaml` généré :
-
-```yaml
-write_files:
-  - path: /etc/rancher/k3s/config.yaml
-    permissions: "0600"
-    content: |
-      token: ${jsonencode(k3s_token)}
-      data-dir: /mnt/k3s-data/rancher/k3s
-      ${indent(6, k3s_config)}
-```
-
-> Comportement selon l'état du disque :
-> - **Premier boot** (disque vierge) : `fs_setup` formate, k3s `cluster-init: true` crée un etcd neuf.
-> - **Rebuild** (disque déjà rempli) : `overwrite: false` ne touche à rien, k3s trouve l'etcd existant sur `/mnt/k3s-data` et **le reprend**. `cluster-init: true` est ignoré sur un etcd existant.
->
-> Vérifier le nom réel du disque (`/dev/sdb` vs `/dev/vdb`) avec `lsblk` : `scsi1` donne `sd*`, un contrôleur `virtio` donnerait `vd*`.
-
-### 13.4 Épingler les données Longhorn au serveur
-
-Les données Longhorn doivent vivre sur le disque persistant du serveur, pas se répartir sur les workers (qui sont jetables). Ajuster l'`Application` Longhorn de l'étape 8.1 :
-
-```yaml
-helm:
-  values: |
-    persistence:
-      defaultClass: true
-      defaultClassReplicaCount: 1      # copie unique, sur le serveur
-    defaultSettings:
-      defaultDataPath: /mnt/k3s-data/longhorn
-```
-
-Puis empêcher Longhorn de planifier des réplicas sur les workers : dans l'UI Longhorn (ou par les réglages de nœud), passer les disques des deux workers en **Scheduling Disabled**. Seul le disque du serveur reste ordonnançable → l'unique réplica y atterrit. Un pod qui tourne sur un worker accède quand même au volume, servi par le réseau depuis le serveur.
-
-> Copie unique = pas de redondance : si le SSD `sdb` lâche, les données sont perdues (choix assumé, pas de backup externe). Pour lever ce risque plus tard sans backup externe, repasser en réplica-3 avec un disque persistant sur **chaque** nœud — mais alors les trois VMs redeviennent des *pets*.
-
-### 13.5 Valider avant toute donnée réelle
-
-`path_in_datastore` étant expérimental, **prouver** que le disque survit à un `-replace` avant d'y mettre quoi que ce soit d'important.
-
-1. Déployer le serveur avec son disque, laisser k3s démarrer, poser deux témoins :
-
-   ```bash
-   # témoin dans etcd
-   kubectl create configmap survivor --from-literal=proof=avant-replace
-   # témoin dans Longhorn : un PVC + un fichier connu, écrit depuis un pod qui le monte
-   ```
-
-2. Recréer la VM serveur :
-
-   ```bash
-   tofu apply -replace='proxmox_virtual_environment_vm.k3s["control_plane"]'
-   ```
-
-3. Après redémarrage, vérifier que **rien n'a été perdu** :
-   - le volume `vm-9900-disk-0` existe toujours (Proxmox → media-storage) ;
-   - le témoin etcd est là : `kubectl get configmap survivor -o jsonpath='{.data.proof}'` ;
-   - Argo CD et le contrôleur Sealed Secrets sont présents, les secrets déchiffrés ;
-   - le fichier du PVC Longhorn est intact ;
-   - les deux agents se sont reconnectés : `kubectl get nodes` → 3 nœuds `Ready`.
-
-> Tant que ce test n'a pas réussi, ne migre aucune donnée réelle.
-
-### Cas particulier : reconstruction from-scratch
-
-Un seul scénario reste destructeur : la **perte du disque de données** lui-même (SSD mort, ou suppression volontaire du volume `vm-9900-disk-0`). Là, le cluster repart **à vide** — c'est le seul cas qui redevient un vrai bootstrap.
-
-- Rejouer `kubernetes/bootstrap.sh` (étape 7) pour réinstaller Argo CD + Sealed Secrets, puis laisser Argo CD tout resynchroniser depuis Git.
-- La clé Sealed Secrets, elle, vivait dans l'etcd **sur le disque perdu**, et on a choisi de ne pas la sauvegarder hors cluster. Il faut donc **re-sceller** les secrets (étape 7). C'est la contrepartie assumée de la copie unique.
-
-Autrement dit, `bootstrap.sh` ne sert plus que dans ce cas extrême : tant que le disque persistant survit, un `-replace` du serveur reprend tout seul, sans bootstrap.
-
-### Repli si `path_in_datastore` déçoit
-
-Si l'attache expérimentale se révèle instable (bug de provider, disque non rattaché après un `-replace`), bascule sur un modèle plus simple : garder le disque **dans** la VM serveur et **ne jamais** faire `-replace` dessus. Le serveur devient alors un *pet* : la reprise après coupure de courant reste automatique, seul un rebuild OS from-scratch redevient une procédure manuelle (détacher le disque → recréer la VM → rattacher).
-
-### Validation
-
-1. **Reprise sur reboot** : redémarrer la VM serveur (`reboot`) et vérifier que k3s reprend, `kubectl get nodes` → 3 `Ready`.
-2. **Survie au `-replace`** : le test complet de 13.5 (témoins etcd + Longhorn intacts après recréation de la VM).
-3. **Disque non supprimé** : après un `-replace`, `vm-9900-disk-0` est toujours présent dans `media-storage`.
