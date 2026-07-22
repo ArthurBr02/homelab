@@ -50,6 +50,8 @@
 
   Les trois machines doivent apparaître sans intervention dans l'interface. Faire ensuite un commit et un push.
 
+> Le clonage **complet** des trois VMs en parallèle peut saturer l'API Proxmox et échouer sur le suivi de tâche avec `HTTP 599 Too many redirections` (la VM est alors clonée mais laissée à moitié configurée — arrêtée, RAM du template). Relancer en série : `terraform apply -parallelism=1`. Terraform garde ce qui a réussi et ne finit que le reste.
+
 ### Validation
 
 Exécuter :
@@ -254,10 +256,29 @@ resource "proxmox_virtual_environment_file" "cloud_init" {
     path      = local_sensitive_file.cloud_init[each.key].filename
     file_name = "${each.value.name}-cloud-init.yaml"
   }
+
+  # Ré-uploade le snippet dès que le contenu généré change (voir piège ci-dessous).
+  lifecycle {
+    replace_triggered_by = [local_sensitive_file.cloud_init[each.key].id]
+  }
 }
 ```
 
 Utiliser impérativement `source_file` avec `upload_mode = "sftp"` lorsque le compte `root` de Proxmox utilise `zsh`. Le mode `stream` transmet le YAML sur l'entrée standard du shell et peut provoquer son exécution accidentelle directement sur l'hôte Proxmox.
+
+> **Piège majeur : le snippet n'est PAS ré-uploadé quand son contenu change.** `proxmox_virtual_environment_file` se repère au **nom de fichier**, pas au hash du contenu. Quand tu modifies le template, Terraform régénère bien le fichier local (`local_sensitive_file` est remplacé) mais **laisse le snippet sur Proxmox tel quel** — `tofu apply` affiche `no changes` sur cette ressource. Un `-replace` de VM rebooterait alors sur l'**ancien** cloud-init, en silence (symptôme vécu : disque persistant jamais monté, `data-dir` absent de `config.yaml`).
+>
+> Le bloc `lifecycle { replace_triggered_by = [...] }` ci-dessus corrige ça : il force le ré-upload dès que le contenu généré change. Sans ce bloc, forcer à la main après chaque modif de template :
+>
+> ```bash
+> tofu apply -replace='proxmox_virtual_environment_file.cloud_init["control_plane"]'
+> ```
+>
+> Et **toujours vérifier sur l'hôte Proxmox** que le snippet uploadé contient bien tes changements avant de recréer la VM :
+>
+> ```bash
+> grep -nE 'disk_setup|data-dir' /media/storage/snippets/k3s-control-plane-1-cloud-init.yaml
+> ```
 
 Dans `terraform/cloned-vm.tf`, attacher le snippet au bloc `initialization` existant de la ressource `proxmox_virtual_environment_vm.k3s` :
 
@@ -357,6 +378,8 @@ Le choix de ce homelab (détaillé en 8.1) : **rester à 1 serveur + 2 agents**,
   ```
 
   Le résultat doit contenir trois lignes avec l'état `Ready`.
+
+> Sur un nœud k3s, un `kubectl` autonome peut manquer : k3s embarque le sien. Utiliser `sudo k3s kubectl get nodes`, ou exporter `KUBECONFIG=/etc/rancher/k3s/k3s.yaml` (fichier `root:root 600`, donc via `sudo` ou après l'avoir copié + chowné). k3s crée normalement le lien `/usr/local/bin/kubectl` à l'installation.
 
 ## 6. Faire un premier test manuel
 
@@ -765,6 +788,8 @@ write_files:
 > Vérifier le nom réel du disque (`/dev/sdb` vs `/dev/vdb`) avec `lsblk` : `scsi1` donne `sd*`, un contrôleur `virtio` donnerait `vd*`.
 >
 > Ordonnancement : sur une construction **neuve**, intégrer ces changements Cloud-Init dès l'étape 4 (à la création des VMs). Sur le cluster **existant**, les appliquer ici en recréant la VM serveur (le bot n'a pas encore de données critiques).
+>
+> Après toute modif du template, **vérifier que le snippet a bien été ré-uploadé à Proxmox avant de recréer la VM** (voir le piège du snippet à l'étape 4). Sans le `replace_triggered_by`, le `-replace` rebooterait sur l'ancien cloud-init et le disque ne serait pas monté.
 
 ### 8.2 Longhorn (stockage bloc répliqué)
 
@@ -947,7 +972,7 @@ spec:
 
 > Tant que cette restauration n'a pas fonctionné, ne migre aucune donnée réelle.
 
-**Survie du disque persistant** — `path_in_datastore` étant expérimental, à prouver avant toute donnée réelle :
+**Survie du disque persistant** — procédure de validation (à rejouer avant toute donnée réelle, `path_in_datastore` étant expérimental) :
 
 1. Poser deux témoins : `kubectl create configmap survivor --from-literal=proof=avant-replace`, plus un PVC Longhorn contenant un fichier connu.
 2. Recréer la VM serveur : `tofu apply -replace='proxmox_virtual_environment_vm.k3s["control_plane"]'`.
@@ -957,6 +982,10 @@ spec:
    - Argo CD + Sealed Secrets présents, secrets déchiffrés ;
    - le fichier du PVC Longhorn intact ;
    - les deux agents reconnectés : `kubectl get nodes` → 3 `Ready`.
+
+> **Reprise en place validée en pratique** : le volume `vm-9900-disk-0` survit à un `-replace` **et** à un `terraform destroy` complet (possédé par le VMID fantôme 9900, `delete_unreferenced_disks_on_destroy = false`), et k3s reprend l'etcd depuis le disque. Le nœud serveur garde même son ancienneté (`AGE`) après recréation, preuve que l'etcd est repris et non réinitialisé.
+>
+> **From-scratch : les workers ne se ré-enregistrent pas seuls.** Quand le serveur repart sur un etcd **neuf** (disque vierge ou wipé), il génère une **nouvelle CA TLS** ; les agents ont l'ancienne en cache et échouent (`x509: certificate signed by unknown authority`). Il faut les recréer — ils sont du cattle : `tofu apply -replace='proxmox_virtual_environment_vm.k3s["worker_1"]' -replace='...worker_2'` (ou wiper `/var/lib/rancher/k3s/agent` sur chacun). Dans le cas **normal** (reprise en place, etcd + CA préservés sur le disque), les workers se reconnectent **tout seuls**.
 
 > **Cas particulier — perte du disque de données** (SSD mort ou volume supprimé) : le cluster repart à vide. Rejouer `kubernetes/bootstrap.sh` (étape 7), puis **re-sceller** les secrets — la clé Sealed Secrets vivait dans l'etcd sur le disque perdu (copie unique assumée). Tant que le disque survit, un `-replace` reprend seul, sans bootstrap.
 >

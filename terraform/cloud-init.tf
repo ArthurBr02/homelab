@@ -46,4 +46,11 @@ resource "proxmox_virtual_environment_file" "cloud_init" {
     path      = local_sensitive_file.cloud_init[each.key].filename
     file_name = "${each.value.name}-cloud-init.yaml"
   }
+
+  # bpg repère le fichier par son nom, pas par le hash du contenu : sans ça, une
+  # modification du template ne ré-uploade pas le snippet. Forcer le remplacement
+  # dès que le fichier local généré change.
+  lifecycle {
+    replace_triggered_by = [local_sensitive_file.cloud_init[each.key].id]
+  }
 }

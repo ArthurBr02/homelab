@@ -7,12 +7,22 @@
 # Secrets controller once this script has run.
 #
 # Prerequisites:
-#   - kubectl points to the freshly rebuilt cluster
-#   - the Sealed Secrets private key backup is available locally
-#     (see SEALED_SECRETS_KEY_BACKUP below)
+#   - kubectl can reach the cluster. Run this ON a k3s server node, where the
+#     kubeconfig lives at /etc/rancher/k3s/k3s.yaml (root-readable only). Without
+#     KUBECONFIG set, kubectl falls back to localhost:8080 and fails with
+#     "connection refused" — so export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+#     (or invoke `k3s kubectl`).
+#   - The Sealed Secrets private key backup is available locally
+#     (see SEALED_SECRETS_KEY_BACKUP below). It is the key EXPORTED from the
+#     previous cluster; restoring it keeps the Git SealedSecrets decryptable.
+#     Without it, install Sealed Secrets fresh and re-seal every secret by hand.
 #
 # Usage:
-#   SEALED_SECRETS_KEY_BACKUP=/path/to/sealed-secrets-key-backup.yaml ./kubernetes/bootstrap.sh
+#   Reading the kubeconfig needs root, so run under sudo. IMPORTANT: sudo wipes
+#   the environment, so pass the variables AFTER `sudo`, not before it — and use
+#   an absolute path for the key backup:
+#
+#   sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml SEALED_SECRETS_KEY_BACKUP=/home/ubuntu/sealed-secrets-key-backup.yaml ./kubernetes/bootstrap.sh
 
 set -euo pipefail
 
