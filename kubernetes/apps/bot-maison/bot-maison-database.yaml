@@ -2,7 +2,7 @@ apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
   name: bot-maison-db
-  namespace: default
+  namespace: bot-maison
 spec:
   instances: 1                      # 1 pour commencer, 2 une fois Longhorn éprouvé (étape 12)
   bootstrap:

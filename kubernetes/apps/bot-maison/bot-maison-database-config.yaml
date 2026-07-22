@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: bot-maison-database-config
-  namespace: default
+  namespace: bot-maison
 data:
   POSTGRES_HOST: bot-maison-db-rw
   POSTGRES_PORT: "5432"

@@ -16,7 +16,7 @@ spec:
       - name: ghcr-login-secret
       containers:
       - name: bot-maison
-        image: ghcr.io/arthurbr02/bot-maison:latest
+        image: ghcr.io/arthurbr02/bot-maison:1.2.0
         resources:
           requests:
             memory: "64Mi"
