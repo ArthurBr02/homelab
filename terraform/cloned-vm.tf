@@ -25,14 +25,14 @@ locals {
 }
 
 resource "proxmox_virtual_environment_vm" "k3s" {
-  for_each = local.k3s_vms
-
-  vm_id         = each.value.vm_id
-  name          = each.value.name
-  description   = "Nœud ${each.value.role} du cluster k3s — géré par Terraform"
-  node_name     = var.proxmox_node_name
-  scsi_hardware = "virtio-scsi-single"
-  tags          = ["k3s", each.value.role, "terraform"]
+  for_each                             = local.k3s_vms
+  delete_unreferenced_disks_on_destroy = false
+  vm_id                                = each.value.vm_id
+  name                                 = each.value.name
+  description                          = "Nœud ${each.value.role} du cluster k3s — géré par Terraform"
+  node_name                            = var.proxmox_node_name
+  scsi_hardware                        = "virtio-scsi-single"
+  tags                                 = ["k3s", each.value.role, "terraform"]
 
   on_boot = true
   started = true
@@ -42,6 +42,22 @@ resource "proxmox_virtual_environment_vm" "k3s" {
     node_name    = var.proxmox_node_name
     datastore_id = var.proxmox_datastore_id
     full         = true
+  }
+
+  disk {
+    datastore_id = var.proxmox_datastore_id
+    interface    = "scsi0"
+    size         = 20            # ⚠ mettre la taille réelle de scsi0 (qm config)
+  }
+
+  dynamic "disk" {
+    for_each = each.key == "control_plane" ? [1] : []
+    content {
+      datastore_id      = var.proxmox_datastore_id
+      path_in_datastore = "9900/vm-9900-disk-0.raw" # volume possédé hors VM
+      interface         = "scsi1"
+      size              = 100
+    }
   }
 
   agent {
@@ -72,8 +88,8 @@ resource "proxmox_virtual_environment_vm" "k3s" {
   }
 
   initialization {
-    datastore_id = var.proxmox_datastore_id
-    interface    = "ide0"
+    datastore_id      = var.proxmox_datastore_id
+    interface         = "ide0"
     user_data_file_id = proxmox_virtual_environment_file.cloud_init[each.key].id
 
     user_account {

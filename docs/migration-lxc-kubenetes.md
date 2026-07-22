@@ -683,10 +683,10 @@ media-storage (sdb, persiste toujours)
 
 ```bash
 # sur l'hôte Proxmox
-pvesm alloc media-storage 9900 vm-9900-disk-0 100G --format raw
+pvesm alloc media-storage 9900 vm-9900-disk-0.raw 100G --format raw
 ```
 
-Le volume `media-storage:vm-9900-disk-0` n'appartient à aucune VM active : Terraform ne le détruira jamais.
+Le volume ainsi créé — son volid exact est visible avec `pvesm list media-storage | grep 9900`, par exemple `media-storage:9900/vm-9900-disk-0.raw` — n'appartient à aucune VM active : Terraform ne le détruira jamais.
 
 **Attacher le disque à la VM serveur (Terraform).** Deux changements dans `terraform/cloned-vm.tf`, **uniquement pour le serveur** :
 
@@ -696,22 +696,33 @@ Le volume `media-storage:vm-9900-disk-0` n'appartient à aucune VM active : Terr
    delete_unreferenced_disks_on_destroy = false
    ```
 
-2. Attacher le volume existant par son chemin, au lieu d'en créer un neuf. La `for_each` itère sur les trois VMs ; on n'ajoute ce disque qu'au `control_plane` :
+2. Déclarer les disques. **Dès qu'on ajoute un bloc `disk`, bpg gère la liste complète des disques de la VM** : il faut donc aussi déclarer le disque OS cloné (`scsi0`), sinon bpg tente de le supprimer au prochain apply (`cannot delete boot disk "scsi0"`). On déclare `scsi0` pour **toutes** les VMs, et on n'ajoute `scsi1` (le disque persistant) qu'au `control_plane` :
 
    ```hcl
+   # disque OS cloné — obligatoire, sinon bpg veut le supprimer
+   disk {
+     datastore_id = var.proxmox_datastore_id
+     interface    = "scsi0"
+     size         = 20            # taille réelle du disque OS : qm config 9001 | grep scsi0
+   }
+
+   # disque de données persistant — serveur uniquement
    dynamic "disk" {
      for_each = each.key == "control_plane" ? [1] : []
      content {
        datastore_id      = var.proxmox_datastore_id
-       path_in_datastore = "vm-9900-disk-0"   # volume possédé hors VM
+       path_in_datastore = "9900/vm-9900-disk-0.raw"   # format stockage-répertoire
        interface         = "scsi1"
+       size              = 100
      }
    }
    ```
 
-> `path_in_datastore` référence un volume **déjà existant** : Terraform l'attache sans le recréer ni le formater. Combiné à `delete_unreferenced_disks_on_destroy = false`, un `tofu apply -replace` du serveur détruit la VM mais **laisse le volume intact**, puis le rattache à la nouvelle VM.
+> `path_in_datastore` référence un volume **déjà existant** : Terraform l'attache sans le recréer ni le formater. Le volume garde son nom `vm-9900-disk-0` (possédé par le VMID fantôme 9900), condition nécessaire pour survivre à un `-replace`.
 >
-> ⚠️ `path_in_datastore` est marqué **expérimental** par `bpg/proxmox` (la demande d'un `prevent_from_destruction` natif a été refusée, « not planned »). Épingler la version du provider dans `terraform/versions.tf`, et **tester** (8.5) avant d'y confier des données.
+> **Le format de `path_in_datastore` dépend du type de stockage.** Sur un stockage **répertoire** comme `media-storage`, c'est `<vmid>/<fichier>.<ext>` — récupérer le volid exact avec `pvesm list media-storage | grep 9900`, et prendre tout ce qui suit `media-storage:`. Sur du LVM/bloc, ce serait `vm-9900-disk-0` tout court.
+>
+> ⚠️ `path_in_datastore` est marqué **expérimental** par `bpg/proxmox` (la demande d'un `prevent_from_destruction` natif a été refusée, « not planned »). Épingler la version du provider dans `terraform/versions.tf`, et **prouver la survie au `-replace`** (8.5) avant d'y confier des données.
 
 **Monter le disque et y placer l'etcd (Cloud-Init).** Dans `terraform/cloud-init/k3s.yaml.tftpl`, uniquement sur le serveur, préparer et monter le disque **de façon idempotente** : il ne faut surtout pas reformater un disque qui contient déjà l'etcd au moment d'un rebuild.
 
@@ -739,9 +750,13 @@ write_files:
     permissions: "0600"
     content: |
       token: ${jsonencode(k3s_token)}
+%{ if install_exec == "server" ~}
       data-dir: /mnt/k3s-data/rancher/k3s
+%{ endif ~}
       ${indent(6, k3s_config)}
 ```
+
+`data-dir` est conditionné au serveur : `/mnt/k3s-data` n'est monté que là. Sur un worker (agent), on garde le data-dir par défaut.
 
 > Comportement selon l'état du disque :
 > - **Premier boot** (disque vierge) : `fs_setup` formate, k3s `cluster-init: true` crée un etcd neuf.
@@ -1012,7 +1027,7 @@ Ils constituent le socle de l'infrastructure. Si le DNS, le reverse proxy ou les
 - Déplacer le fichier d'état Terraform vers un backend distant (S3 ou MinIO).
 - Configurer les sauvegardes Proxmox des trois VMs du cluster.
 
-> Le disque de données persistant (`vm-9900-disk-0`, voir 8.1) n'appartient à aucune VM : un backup Proxmox de la VM serveur **ne le capture pas**. C'est cohérent avec la copie unique assumée. Pour le protéger malgré tout, l'ajouter comme cible de backup dédiée ou le copier à froid — seul moyen de lever le risque « SSD mort = perte totale ».
+> Le disque de données persistant (`vm-9900-disk-0`, voir 8.1) est **attaché** à la VM serveur (`scsi1`, `backup=1`) : un backup Proxmox de la VM serveur **le capture donc**. C'est un filet gratuit contre le « SSD mort = perte totale » — à condition que la destination de backup soit sur un **autre support physique** que `media-storage`, sinon la panne du SSD emporterait aussi la sauvegarde.
 
 ### Vérification finale
 
