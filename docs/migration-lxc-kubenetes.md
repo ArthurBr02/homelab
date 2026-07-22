@@ -463,7 +463,7 @@ Argo CD lit le dépôt Git et applique tout seul son contenu au cluster. C'est l
    - Utilisateur : `admin`.
    - Mot de passe : la valeur récupérée à l'étape précédente.
 
-   > Cet accès est temporaire : il ne dure que le temps où les deux commandes tournent, et rien n'est publié sur le réseau. Exposer Argo CD en permanence (via un Ingress derrière le Nginx Proxy Manager de la LXC 111) est une décision à part, car cela met l'interface d'administration face au réseau. À décider plus tard, pas maintenant.
+   > Cet accès est temporaire : il ne dure que le temps où les deux commandes tournent, et rien n'est publié sur le réseau. Il reste la méthode de secours si le reverse proxy ou l'Ingress ne fonctionne plus. L'accès permanent par nom de domaine est décrit ci-dessous.
 
 4. Après la première connexion, changer le mot de passe puis supprimer le secret initial devenu inutile :
 
@@ -504,7 +504,7 @@ Argo CD lit le dépôt Git et applique tout seul son contenu au cluster. C'est l
    > Deux réglages faciles à oublier, qui donnent une app racine « Synced » mais vide :
    >
    > - `directory.recurse: true` : sans lui, Argo CD ne lit que les YAML **directement** dans `kubernetes/apps/`, et ignore les sous-dossiers comme `kubernetes/apps/bot-maison/`. Résultat : arbre vide, aucune ressource déployée.
-   > - `destination.namespace` : les manifestes du bot n'indiquent pas de namespace. Argo CD a besoin d'une cible, sinon il refuse la ressource avec `InvalidSpecError: Namespace ... is missing`.
+   > - `destination.namespace` : les manifestes sans namespace explicite utilisent cette cible ; sans elle, Argo CD refuse la ressource avec `InvalidSpecError: Namespace ... is missing`.
 
 6. Appliquer une seule fois cette application racine :
 
@@ -513,6 +513,118 @@ Argo CD lit le dépôt Git et applique tout seul son contenu au cluster. C'est l
    ```
 
    À partir de là, Argo CD déploie et surveille tout ce qui se trouve sous `kubernetes/apps/`.
+
+#### Exposer Argo CD sur `argocd.arthurbratigny.fr`
+
+Le chemin réseau retenu est :
+
+```text
+Internet → Nginx Proxy Manager (TLS) → 192.168.1.100:80
+         → Traefik → Service argocd-server:80
+```
+
+Nginx Proxy Manager termine TLS. Argo CD sert donc HTTP à l'intérieur du réseau
+de confiance ; il ne faut jamais publier directement le port 80 de Traefik sur
+Internet.
+
+Créer `kubernetes/apps/argocd-access/config.yaml` :
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  url: https://argocd.arthurbratigny.fr
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmd-params-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-cmd-params-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  server.insecure: "true"
+```
+
+Créer `kubernetes/apps/argocd-access/ingress.yaml` :
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argocd
+  namespace: argocd
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: argocd.arthurbratigny.fr
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: argocd-server
+                port:
+                  name: http
+```
+
+Après le premier sync de `server.insecure`, redémarrer une fois le serveur pour
+qu'il relise le paramètre :
+
+```bash
+kubectl rollout restart deployment argocd-server -n argocd
+kubectl rollout status deployment argocd-server -n argocd
+```
+
+Dans le DNS public, créer un enregistrement `argocd.arthurbratigny.fr` pointant
+vers l'adresse publique qui arrive sur Nginx Proxy Manager. Dans Nginx Proxy
+Manager, créer un **Proxy Host** :
+
+- Domain Names : `argocd.arthurbratigny.fr` ;
+- Scheme : `http` ;
+- Forward Hostname/IP : `192.168.1.100` ;
+- Forward Port : `80` ;
+- Websockets Support : activé ;
+- Block Common Exploits : activé ;
+- certificat Let's Encrypt, `Force SSL` et HTTP/2 activés.
+
+Si le routeur ne supporte pas le NAT loopback, ajouter aussi une entrée DNS
+locale qui résout `argocd.arthurbratigny.fr` vers l'adresse LAN de Nginx Proxy
+Manager. Le nom et le certificat restent identiques à l'intérieur et à
+l'extérieur du réseau.
+
+Le proxy doit conserver le header `Host`, ce que Nginx Proxy Manager fait par
+défaut : Traefik s'en sert pour sélectionner l'Ingress.
+
+Valider depuis le réseau local avant d'ouvrir le NAT :
+
+```bash
+curl -I -H 'Host: argocd.arthurbratigny.fr' http://192.168.1.100
+```
+
+Puis ouvrir `https://argocd.arthurbratigny.fr`. Pour le CLI derrière ce reverse
+proxy HTTP, utiliser le mode gRPC-Web :
+
+```bash
+argocd login argocd.arthurbratigny.fr --grpc-web
+argocd app list --grpc-web
+```
+
+> Argo CD est une interface d'administration critique. Préférer un accès par
+> VPN ou une Access List Nginx Proxy Manager. Si elle est accessible depuis
+> Internet, conserver TLS, un mot de passe unique, supprimer le secret admin
+> initial et configurer ensuite un SSO/MFA. Ne pas ajouter de cache CDN devant
+> Argo CD.
 
 ### Installer Sealed Secrets
 
@@ -943,6 +1055,9 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      # Les CRD CloudNativePG dépassent la limite des annotations du
+      # client-side apply.
+      - ServerSideApply=true
 ```
 
 **Définir une base par application.** L'opérateur installé, une base se décrit par une ressource `Cluster`, placée dans le dossier de l'application concernée (une base par app, elles évoluent ensemble). Exemple type, avec sauvegarde vers Garage :
@@ -969,10 +1084,13 @@ spec:
         secretAccessKey:
           name: garage-app-creds
           key: ACCESS_SECRET_KEY
+        region:
+          name: garage-app-creds
+          key: AWS_REGION
     retentionPolicy: "30d"
 ```
 
-> Les identifiants d'accès Garage (`garage-app-creds`) sont un secret : le sceller avec `kubeseal` et le commiter, comme les autres. La clé provient de l'amorçage Garage (8.3, `garage key create`). `instances: 1` au départ ; passer à `2` seulement après avoir validé Longhorn et équipé les nœuds (étape 12).
+> Les identifiants d'accès Garage (`garage-app-creds`) sont un secret : le sceller avec `kubeseal` et le commiter, comme les autres. Il doit contenir `ACCESS_KEY_ID`, `ACCESS_SECRET_KEY` et `AWS_REGION=garage`. La clé provient de l'amorçage Garage (8.3, `garage key create`). `instances: 1` au départ ; passer à `2` seulement après avoir validé Longhorn et équipé les nœuds (étape 12).
 
 ### 8.5 Valider
 
@@ -1006,6 +1124,248 @@ spec:
 > **Cas particulier — perte du disque de données** (SSD mort ou volume supprimé) : le cluster repart à vide. Rejouer `kubernetes/bootstrap.sh` (étape 7), puis **re-sceller** les secrets — la clé Sealed Secrets vivait dans l'etcd sur le disque perdu (copie unique assumée). Tant que le disque survit, un `-replace` reprend seul, sans bootstrap.
 >
 > **Repli si `path_in_datastore` déçoit** : garder le disque **dans** la VM serveur et ne jamais faire `-replace` dessus — le serveur devient un *pet*, la reprise après coupure reste automatique, seul un rebuild OS from-scratch redevient manuel (détacher → recréer → rattacher).
+
+### 8.6 Interfaces d'administration
+
+Les interfaces d'administration ne doivent pas être nécessaires au
+fonctionnement des services. Les garder en `ClusterIP` et commencer par un
+`kubectl port-forward`. Une exposition permanente doit passer par Traefik,
+Nginx Proxy Manager, TLS et une restriction d'accès.
+
+#### PostgreSQL depuis DataGrip (recommandé)
+
+CloudNativePG ne publie pas PostgreSQL hors du cluster. Ouvrir un tunnel local
+vers le Service primaire de la base voulue :
+
+```bash
+kubectl port-forward -n bot-maison svc/bot-maison-db-rw 15432:5432
+```
+
+Configurer une source PostgreSQL dans DataGrip :
+
+- Host : `127.0.0.1` ;
+- Port : `15432` ;
+- Database : `veille` ;
+- User : valeur `username` du Secret `bot-maison-db-app` ;
+- Password : valeur `password` du même Secret.
+
+Lire ponctuellement les identifiants :
+
+```bash
+kubectl get secret bot-maison-db-app -n bot-maison \
+  -o jsonpath='{.data.username}' | base64 -d; echo
+
+kubectl get secret bot-maison-db-app -n bot-maison \
+  -o jsonpath='{.data.password}' | base64 -d; echo
+```
+
+Le port n'existe que sur la machine qui exécute `kubectl port-forward` et se
+ferme avec `Ctrl+C`. Ne jamais créer un Service `NodePort` ou `LoadBalancer`
+pour PostgreSQL uniquement afin d'utiliser DataGrip.
+
+#### PostgreSQL dans le navigateur avec Adminer (optionnel)
+
+Adminer est utile pour une consultation ponctuelle depuis un navigateur. Créer
+`kubernetes/apps/adminer/resources.yaml` :
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admin-tools
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adminer
+  namespace: admin-tools
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: adminer
+  template:
+    metadata:
+      labels:
+        app: adminer
+    spec:
+      containers:
+        - name: adminer
+          image: adminer:5.4.1-standalone
+          env:
+            - name: ADMINER_DEFAULT_SERVER
+              value: bot-maison-db-rw.bot-maison.svc.cluster.local
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adminer
+  namespace: admin-tools
+spec:
+  selector:
+    app: adminer
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+```
+
+Accéder à l'UI sans l'exposer :
+
+```bash
+kubectl port-forward -n admin-tools svc/adminer 8081:8080
+```
+
+Ouvrir `http://localhost:8081`, choisir PostgreSQL et utiliser les identifiants
+CloudNativePG. Pour une autre base, saisir son DNS complet
+`<cluster>-rw.<namespace>.svc.cluster.local`.
+
+Pour une UI permanente, ajouter un Ingress vers ce Service :
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: adminer
+  namespace: admin-tools
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: db.arthurbratigny.fr
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: adminer
+                port:
+                  name: http
+```
+
+Créer ensuite `db.arthurbratigny.fr` dans le DNS et un Proxy Host Nginx Proxy
+Manager vers `http://192.168.1.100:80`, comme pour Argo CD. Une Access List ou
+un VPN est obligatoire pour ce domaine.
+
+> Adminer permet d'exécuter du SQL et de supprimer des données. Ne pas le rendre
+> public sans authentification supplémentaire au niveau de Nginx Proxy Manager,
+> et idéalement le laisser accessible uniquement par VPN/port-forward.
+
+#### Parcourir les fichiers Garage avec Garage Web UI
+
+[Garage Web UI](https://github.com/khairul169/garage-webui) est un projet tiers
+qui affiche l'état du cluster, les buckets, les clés et les objets. Il utilise
+l'API d'administration Garage : son accès équivaut donc à un accès administrateur
+complet.
+
+Créer d'abord un mot de passe HTTP distinct et le sceller :
+
+```bash
+export GARAGE_UI_PASSWORD='remplacer-par-un-mot-de-passe-fort'
+GARAGE_UI_HASH=$(htpasswd -nbBC 12 garage "$GARAGE_UI_PASSWORD" | cut -d: -f2-)
+
+kubectl create secret generic garage-webui-auth \
+  --namespace garage \
+  --from-literal=AUTH_USER_PASS="garage:$GARAGE_UI_HASH" \
+  --dry-run=client -o yaml \
+  | kubeseal --format yaml \
+  > kubernetes/garage/garage-webui-auth-sealed.yaml
+
+unset GARAGE_UI_PASSWORD GARAGE_UI_HASH
+```
+
+Ajouter le SealedSecret à `kubernetes/garage/kustomization.yaml`, puis créer
+`kubernetes/garage/garage-webui.yaml` :
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: garage-webui
+  namespace: garage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: garage-webui
+  template:
+    metadata:
+      labels:
+        app: garage-webui
+    spec:
+      containers:
+        - name: garage-webui
+          image: khairul169/garage-webui:1.1.0
+          env:
+            - name: API_BASE_URL
+              value: http://garage:3903
+            - name: API_ADMIN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: garage-secrets
+                  key: GARAGE_ADMIN_TOKEN
+            - name: S3_ENDPOINT_URL
+              value: http://garage:3900
+            - name: S3_REGION
+              value: garage
+            - name: AUTH_USER_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: garage-webui-auth
+                  key: AUTH_USER_PASS
+          ports:
+            - name: http
+              containerPort: 3909
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage-webui
+  namespace: garage
+spec:
+  selector:
+    app: garage-webui
+  ports:
+    - name: http
+      port: 3909
+      targetPort: http
+```
+
+Ajouter aussi `garage-webui.yaml` aux ressources du `kustomization.yaml`, puis :
+
+```bash
+kubectl port-forward -n garage svc/garage-webui 3909:3909
+```
+
+Ouvrir `http://localhost:3909` et se connecter avec l'utilisateur `garage` et
+le mot de passe choisi. L'onglet de navigation des objets permet de voir,
+télécharger et gérer les fichiers des buckets.
+
+> Ne pas exposer directement cette UI sur Internet : elle détient
+> `GARAGE_ADMIN_TOKEN`. Si un accès permanent est indispensable, créer un
+> Ingress dédié et appliquer le même chemin Traefik → Nginx Proxy Manager que
+> pour Argo CD, avec TLS **et** une Access List/VPN.
 
 ## 9. Migrer les services
 
@@ -1081,4 +1441,3 @@ Le dépôt Git décrit-il toute l'infrastructure ?
 ```text
 Machine morte → Terraform recrée la VM → Cloud-Init réinstalle k3s → le nœud rejoint le cluster → Argo CD redéploie le reste
 ```
-
