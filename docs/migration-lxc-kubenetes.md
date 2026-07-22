@@ -1161,8 +1161,8 @@ Après le premier sync de `server.insecure`, redémarrer une fois le serveur pou
 qu'il relise le paramètre :
 
 ```bash
-kubectl rollout restart deployment argocd-server -n argocd
-kubectl rollout status deployment argocd-server -n argocd
+sudo kubectl rollout restart deployment argocd-server -n argocd
+sudo kubectl rollout status deployment argocd-server -n argocd
 ```
 
 Dans le DNS public, créer un enregistrement `argocd.arthurbratigny.fr` pointant
@@ -1209,7 +1209,7 @@ argocd app list --grpc-web
 
 Les interfaces d'administration ne doivent pas être nécessaires au
 fonctionnement des services. Les garder en `ClusterIP` et commencer par un
-`kubectl port-forward`. Une exposition permanente doit passer par Traefik,
+`sudo kubectl port-forward`. Une exposition permanente doit passer par Traefik,
 Nginx Proxy Manager, TLS et une restriction d'accès.
 
 #### PostgreSQL depuis DataGrip (recommandé)
@@ -1218,7 +1218,7 @@ CloudNativePG ne publie pas PostgreSQL hors du cluster. Ouvrir un tunnel local
 vers le Service primaire de la base voulue :
 
 ```bash
-kubectl port-forward -n bot-maison svc/bot-maison-db-rw 15432:5432
+sudo kubectl port-forward -n bot-maison svc/bot-maison-db-rw 15432:5432
 ```
 
 Configurer une source PostgreSQL dans DataGrip :
@@ -1232,14 +1232,14 @@ Configurer une source PostgreSQL dans DataGrip :
 Lire ponctuellement les identifiants :
 
 ```bash
-kubectl get secret bot-maison-db-app -n bot-maison \
+sudo kubectl get secret bot-maison-db-app -n bot-maison \
   -o jsonpath='{.data.username}' | base64 -d; echo
 
-kubectl get secret bot-maison-db-app -n bot-maison \
+sudo kubectl get secret bot-maison-db-app -n bot-maison \
   -o jsonpath='{.data.password}' | base64 -d; echo
 ```
 
-Le port n'existe que sur la machine qui exécute `kubectl port-forward` et se
+Le port n'existe que sur la machine qui exécute `sudo kubectl port-forward` et se
 ferme avec `Ctrl+C`. Ne jamais créer un Service `NodePort` ou `LoadBalancer`
 pour PostgreSQL uniquement afin d'utiliser DataGrip.
 
@@ -1305,7 +1305,7 @@ spec:
 Accéder à l'UI sans l'exposer :
 
 ```bash
-kubectl port-forward -n admin-tools svc/adminer 8081:8080
+sudo kubectl port-forward -n admin-tools svc/adminer 8081:8080
 ```
 
 Ouvrir `http://localhost:8081`, choisir PostgreSQL et utiliser les identifiants
@@ -1358,7 +1358,7 @@ Créer d'abord un mot de passe HTTP distinct et le sceller :
 export GARAGE_UI_PASSWORD='remplacer-par-un-mot-de-passe-fort'
 GARAGE_UI_HASH=$(htpasswd -nbBC 12 garage "$GARAGE_UI_PASSWORD" | cut -d: -f2-)
 
-kubectl create secret generic garage-webui-auth \
+sudo kubectl create secret generic garage-webui-auth \
   --namespace garage \
   --from-literal=AUTH_USER_PASS="garage:$GARAGE_UI_HASH" \
   --dry-run=client -o yaml \
@@ -1435,7 +1435,7 @@ spec:
 Ajouter aussi `garage-webui.yaml` aux ressources du `kustomization.yaml`, puis :
 
 ```bash
-kubectl port-forward -n garage svc/garage-webui 3909:3909
+sudo kubectl port-forward -n garage svc/garage-webui 3909:3909
 ```
 
 Ouvrir `http://localhost:3909` et se connecter avec l'utilisateur `garage` et
